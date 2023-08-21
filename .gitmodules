@@ -1,3 +1,6 @@
 [submodule "lib/zigimg"]
 	path = lib/zigimg
 	url = https://github.com/zigimg/zigimg.git
+[submodule "lib/zgltf"]
+	path = lib/zgltf
+	url = https://github.com/zkburke/zgltf.git
