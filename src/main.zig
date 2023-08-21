@@ -4,7 +4,6 @@ const zigimg = @import("zigimg");
 const Image = @import("Image.zig");
 const Renderer = @import("Renderer.zig");
 const RayTracer = @import("RayTracer.zig");
-const AudioMixer = @import("AudioMixer.zig");
 
 const cog_png = @embedFile("res/cog.png");
 
@@ -83,18 +82,13 @@ pub fn main() !void {
     const window_width = 640;
     const window_height = 480;
 
-    const surface_width = 640 / 2;
-    const surface_height = 480 / 2;
+    const surface_width = 640 / 4;
+    const surface_height = 480 / 4;
 
     var renderer: Renderer = undefined;
 
     try renderer.init(window_width, window_height, surface_width, surface_height, "CentralGfx");
     defer renderer.deinit();
-
-    var audio_mixer = AudioMixer{};
-
-    try audio_mixer.init();
-    defer audio_mixer.deinit();
 
     const render_target = Image{
         .pixels = try allocator.alloc(Image.Color, surface_width * surface_height),

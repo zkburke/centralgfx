@@ -157,18 +157,12 @@ pub fn drawTrianglePipeline(
     uniform: anytype,
     vertex_count: usize,
     comptime pipeline: anytype,
-    comptime FragmentInput: type,
-    comptime vertexShader: anytype,
-    comptime fragmentShader: anytype,
 ) void {
     _ = pipeline;
     _ = self;
     _ = pass;
     _ = uniform;
     _ = vertex_count;
-    _ = FragmentInput;
-    _ = vertexShader;
-    _ = fragmentShader;
 }
 
 pub fn drawLinePipeline(
@@ -346,22 +340,6 @@ pub fn drawBoundedTriangle(self: Renderer, pass: Pass, points: [3]@Vector(2, f32
     min_y = 0.1;
     max_x = 0.9;
     max_y = 0.9;
-
-    //clip
-    // min_x = @maximum(min_x, -1);
-    // max_x = @minimum(max_x, 1);
-    // min_y = @maximum(min_y, -1);
-    // max_y = @minimum(max_y, 1);
-
-    // min_x += 1;
-    // max_x += 1;
-    // min_y += 1;
-    // max_y += 1;
-
-    // min_x /= 2;
-    // max_x /= 2;
-    // min_y /= 2;
-    // max_y /= 2;
 
     const e0 = Edge.init(.{ points[1], points[2] });
     const e1 = Edge.init(.{ points[2], points[0] });
