@@ -22,7 +22,7 @@ const TestVertex = struct {
 };
 
 const TestPipelineUniformInput = struct {
-    texture: Image,
+    texture: ?Image,
     vertices: []const TestVertex,
 };
 
@@ -31,7 +31,10 @@ const TestPipelineFragmentInput = struct {
     uv: @Vector(2, f32),
 };
 
-fn testClusterShader(uniform: TestPipelineUniformInput, cluster: MeshCluster) ?TestPipelineClusterOutput {
+fn testClusterShader(
+    uniform: TestPipelineUniformInput,
+    cluster: MeshCluster,
+) ?TestPipelineClusterOutput {
     _ = uniform;
     _ = cluster;
 
@@ -39,7 +42,10 @@ fn testClusterShader(uniform: TestPipelineUniformInput, cluster: MeshCluster) ?T
     return null;
 }
 
-fn testVertexShader(uniform: TestPipelineUniformInput, vertex_index: usize) struct { @Vector(2, f32), TestPipelineFragmentInput } {
+fn testVertexShader(
+    uniform: TestPipelineUniformInput,
+    vertex_index: usize,
+) struct { @Vector(3, f32), TestPipelineFragmentInput } {
     const vertex = uniform.vertices[vertex_index];
 
     var output: TestPipelineFragmentInput = undefined;
@@ -47,16 +53,23 @@ fn testVertexShader(uniform: TestPipelineUniformInput, vertex_index: usize) stru
     output.color = vertex.color;
     output.uv = vertex.uv;
 
-    return .{ vertex.position, output };
+    return .{ .{ vertex.position[0], vertex.position[1], 0 }, output };
 }
 
-fn testFragmentShader(uniform: TestPipelineUniformInput, input: TestPipelineFragmentInput, position: @Vector(2, f32), pixel: *Image.Color) void {
+fn testFragmentShader(
+    uniform: TestPipelineUniformInput,
+    input: TestPipelineFragmentInput,
+    position: @Vector(3, f32),
+    pixel: *Image.Color,
+) void {
     _ = position;
 
     var color: @Vector(4, f32) = .{ 1, 1, 1, 1 };
 
     color *= input.color;
-    color *= uniform.texture.affineSample(input.uv).toNormalized();
+
+    if (uniform.texture) |texture|
+        color *= texture.affineSample(input.uv).toNormalized();
 
     pixel.* = Image.Color.fromNormalized(color);
 }
@@ -199,6 +212,7 @@ pub fn main() !void {
 
         if (true) {
             @memset(render_target.pixels, Image.Color.fromNormalized(.{ 0.25, 0.25, 0.25, 1 }));
+            @memset(depth_target, 1);
 
             const render_pass = Renderer.Pass{
                 .color_image = render_target,
@@ -265,7 +279,6 @@ pub fn main() !void {
                 }
 
                 renderer.drawTriangle(render_pass, triangle);
-                renderer.drawBoundedTriangle(render_pass, triangle);
 
                 Image.mappedBlit(.{
                     .x = @as(usize, @intFromFloat(@fabs(@sin(time_s) * @as(f32, @floatFromInt(render_target.width))))),

@@ -123,8 +123,8 @@ pub fn Pipeline(
     comptime fragmentShaderFn: anytype,
 ) type {
     _ = clusterShaderFn;
-    const VertexShaderFn = fn (uniform: UniformInputType, vertex_index: usize) struct { @Vector(2, f32), FragmentInputType };
-    const FragmentShaderFn = fn (uniform: UniformInputType, input: FragmentInputType, position: @Vector(2, f32), pixel: *Image.Color) void;
+    const VertexShaderFn = fn (uniform: UniformInputType, vertex_index: usize) struct { @Vector(3, f32), FragmentInputType };
+    const FragmentShaderFn = fn (uniform: UniformInputType, input: FragmentInputType, position: @Vector(3, f32), pixel: *Image.Color) void;
 
     return struct {
         pub const UniformInput = UniformInputType;
@@ -182,6 +182,7 @@ pub fn drawLinePipeline(
 
         const fragment_input0: pipeline.FragmentInput = inv0[1];
         const fragment_input1: pipeline.FragmentInput = inv1[1];
+
         var p0 = inv0[0];
         var p1 = inv1[0];
 
@@ -191,10 +192,15 @@ pub fn drawLinePipeline(
             p1 = temp;
         }
 
-        const viewport_scale = @Vector(2, f32){ @as(f32, @floatFromInt(pass.color_image.width)), @as(f32, @floatFromInt(pass.color_image.height)) };
+        const viewport_scale = @Vector(3, f32){
+            @as(f32, @floatFromInt(pass.color_image.width)),
+            @as(f32, @floatFromInt(pass.color_image.height)),
+            1,
+        };
 
-        const target_p0 = (p0 + @as(@Vector(2, f32), @splat(1))) / @as(@Vector(2, f32), @splat(2)) * viewport_scale;
-        const target_p1 = (p1 + @as(@Vector(2, f32), @splat(1))) / @as(@Vector(2, f32), @splat(2)) * viewport_scale;
+        //target_p0/1 is in pixel space (0..width), (0..height)
+        const target_p0 = (p0 + @as(@Vector(3, f32), @splat(1))) / @as(@Vector(3, f32), @splat(2)) * viewport_scale;
+        const target_p1 = (p1 + @as(@Vector(3, f32), @splat(1))) / @as(@Vector(3, f32), @splat(2)) * viewport_scale;
 
         const displacement = target_p1 - target_p0;
         const gradient = displacement[1] / displacement[0];
@@ -218,8 +224,21 @@ pub fn drawLinePipeline(
 
             const line_ratio_x = @as(f32, @floatFromInt(start_x)) / @as(f32, @floatFromInt(end_x));
             const line_ratio_y = line_ratio_x;
+            const line_ratio_z = line_ratio_y;
 
-            const interpolated_point = vectorLerp(f32, 2, p0, p1, @Vector(2, f32){ line_ratio_x, line_ratio_y });
+            const interpolant = @Vector(3, f32){
+                line_ratio_x,
+                line_ratio_y,
+                line_ratio_z,
+            };
+
+            const interpolated_point = vectorLerp(
+                f32,
+                3,
+                p0,
+                p1,
+                interpolant,
+            );
 
             var fragment_input: pipeline.FragmentInput = undefined;
 
@@ -230,7 +249,11 @@ pub fn drawLinePipeline(
 
                 switch (field_type_info) {
                     .Float => {
-                        @field(fragment_input, field.name) = lerp(@field(fragment_input0, field.name), @field(fragment_input1, field.name), line_ratio_x);
+                        @field(fragment_input, field.name) = lerp(
+                            @field(fragment_input0, field.name),
+                            @field(fragment_input1, field.name),
+                            line_ratio_x,
+                        );
                     },
                     .Vector => |vector_info| {
                         @field(fragment_input, field.name) = vectorLerp(
@@ -244,6 +267,14 @@ pub fn drawLinePipeline(
                     else => {},
                 }
             }
+
+            const depth_index = index;
+
+            if (pass.depth_buffer[depth_index] <= interpolated_point[2]) {
+                continue;
+            }
+
+            pass.depth_buffer[depth_index] = interpolated_point[2];
 
             @call(.always_inline, pipeline.fragmentShader, .{ uniform, fragment_input, interpolated_point, &pass.color_image.pixels[index] });
         }
@@ -269,174 +300,136 @@ fn twoTriangleArea(triangle: [3]@Vector(2, f32)) f32 {
     return p1[0] * p2[1] - p2[0] * p1[1];
 }
 
-pub fn drawTriangle(self: Renderer, pass: Pass, points: [3]@Vector(2, f32)) void {
-    var view_scale = @Vector(2, f32){
-        @as(f32, @floatFromInt(pass.color_image.width)),
-        @as(f32, @floatFromInt(pass.color_image.height)),
-    };
-
-    var min = (points[0] + @Vector(2, f32){ 1, 1 }) / @Vector(2, f32){ 2, 2 } * view_scale;
-    var mid = (points[1] + @Vector(2, f32){ 1, 1 }) / @Vector(2, f32){ 2, 2 } * view_scale;
-    var max = (points[2] + @Vector(2, f32){ 1, 1 }) / @Vector(2, f32){ 2, 2 } * view_scale;
-
-    if (max[1] < mid[1]) {
-        const temp = max;
-        max = mid;
-        mid = temp;
-    }
-
-    if (mid[1] < min[1]) {
-        const temp = mid;
-        mid = min;
-        min = temp;
-    }
-
-    if (max[1] < mid[1]) {
-        const temp = max;
-        max = mid;
-        mid = temp;
-    }
-
-    self.scanTriangle(pass, min, mid, max, twoTriangleArea(.{ min, max, mid }) >= 0);
-}
-
-pub fn drawBoundedTriangle(self: Renderer, pass: Pass, points: [3]@Vector(2, f32)) void {
+pub fn drawTriangle(
+    self: Renderer,
+    pass: Pass,
+    points: [3]@Vector(2, f32),
+) void {
     _ = self;
-
     const Edge = struct {
-        a: f32,
-        b: f32,
-        c: f32,
-        tie: bool,
+        p0: @Vector(2, isize),
+        p1: @Vector(2, isize),
 
-        pub fn init(vertices: [2]@Vector(2, f32)) @This() {
-            var this: @This() = undefined;
+        color0: @Vector(4, f32),
+        color1: @Vector(4, f32),
 
-            this.a = vertices[0][1] - vertices[1][1];
-            this.b = vertices[1][0] - vertices[0][0];
-            this.c = (this.a * (vertices[0][0] + vertices[1][0]) + this.b * (vertices[0][1] + vertices[1][1])) / 2;
-            this.tie = if (this.a != 0) this.a > 0 else this.b > 0;
-
-            return this;
-        }
-
-        pub fn evaluate(this: @This(), x: f32, y: f32) f32 {
-            return this.a * x + this.b * y + this.c;
-        }
-
-        pub fn isInside(this: @This(), x: f32, y: f32) bool {
-            const val = this.evaluate(x, y);
-
-            return val >= 0 and this.tie;
+        pub fn init(
+            p0: @Vector(2, isize),
+            p1: @Vector(2, isize),
+            color0: @Vector(4, f32),
+            color1: @Vector(4, f32),
+        ) @This() {
+            if (p0[1] < p1[1]) {
+                return .{
+                    .p0 = p0,
+                    .p1 = p1,
+                    .color0 = color0,
+                    .color1 = color1,
+                };
+            } else {
+                return .{
+                    .p0 = p1,
+                    .p1 = p0,
+                    .color0 = color1,
+                    .color1 = color0,
+                };
+            }
         }
     };
 
-    var min_x = @min(@min(points[0][0], points[1][0]), points[2][0]);
-    var min_y = @min(@min(points[0][1], points[1][1]), points[2][1]);
-    var max_x = @max(@max(points[0][0], points[1][0]), points[2][0]);
-    var max_y = @max(@max(points[0][1], points[1][1]), points[2][1]);
+    const Span = struct {
+        x0: isize,
+        x1: isize,
+        color0: @Vector(4, f32),
+        color1: @Vector(4, f32),
 
-    min_x = 0.1;
-    min_y = 0.1;
-    max_x = 0.9;
-    max_y = 0.9;
-
-    const e0 = Edge.init(.{ points[1], points[2] });
-    const e1 = Edge.init(.{ points[2], points[0] });
-    const e2 = Edge.init(.{ points[0], points[1] });
-
-    const area = 0.5 * (e0.c + e1.c + e2.c);
-
-    if (area < 0 and false) {
-        return;
-    }
-
-    var y: usize = @as(usize, @intFromFloat(min_y * @as(f32, @floatFromInt(pass.color_image.height))));
-
-    while (y < @as(usize, @intFromFloat(max_y * @as(f32, @floatFromInt(pass.color_image.height))))) : (y += 1) {
-        var pixels = pass.color_image.pixels.ptr + y * pass.color_image.width;
-
-        var x: usize = @as(usize, @intFromFloat(min_x * @as(f32, @floatFromInt(pass.color_image.width))));
-
-        while (x < @as(usize, @intFromFloat(max_x * @as(f32, @floatFromInt(pass.color_image.width))))) : ({
-            x += 1;
-            pixels += 1;
-        }) {
-            const xf = @as(f32, @floatFromInt(x));
-            const yf = @as(f32, @floatFromInt(y));
-
-            if (e0.isInside(xf, yf) and e1.isInside(xf, yf) and e2.isInside(xf, yf)) {
-                pixels[0] = .{ .r = 0, .g = 255, .b = 0, .a = 255 };
+        pub fn init(
+            x0: isize,
+            x1: isize,
+            color0: @Vector(4, f32),
+            color1: @Vector(4, f32),
+        ) @This() {
+            if (x0 < x1) {
+                return .{
+                    .x0 = x0,
+                    .x1 = x1,
+                    .color0 = color0,
+                    .color1 = color1,
+                };
+            } else {
+                return .{
+                    .x0 = x1,
+                    .x1 = x0,
+                    .color0 = color1,
+                    .color1 = color0,
+                };
             }
         }
 
-        pixels[0] = .{ .r = 255, .g = 0, .b = 0, .a = 255 };
-    }
-}
+        fn drawScanLines(render_pass: Pass, left: Edge, right: Edge) void {
+            const left_y_diff = left.p1[1] - left.p0[1];
 
-fn scanTriangle(
-    self: Renderer,
-    pass: Pass,
-    min: @Vector(2, f32),
-    mid: @Vector(2, f32),
-    max: @Vector(2, f32),
-    handedness: bool,
-) void {
-    _ = self;
+            if (left_y_diff == 0) return;
 
-    const Edge = struct {
-        start_y: f32 = 0,
-        end_y: f32 = 0,
-        step_x: f32 = 0,
-        x: f32 = 0,
-        color: @Vector(4, f32),
+            const right_y_diff = right.p1[1] - right.p0[1];
 
-        fn init(start: @Vector(2, f32), end: @Vector(2, f32), color: @Vector(4, f32)) @This() {
-            const start_y = @ceil(start[1]);
-            const end_y = @ceil(end[1]);
-            const dist_x = end[0] - start[0];
-            const dist_y = end[1] - start[1];
-            const step_x = dist_x / dist_y;
-            const prestep_y = start_y - start[1];
+            if (right_y_diff == 0) return;
 
-            return .{
-                .start_y = start_y,
-                .end_y = end_y,
-                .step_x = step_x,
-                .x = start[1] + prestep_y * step_x,
-                .color = color,
-            };
-        }
+            const left_x_diff = left.p1[0] - left.p0[0];
+            const right_x_diff = right.p1[0] - right.p0[0];
 
-        fn step(edge: *@This()) void {
-            edge.x += edge.step_x;
-        }
+            const left_color_diff = left.color1 - left.color0;
+            const right_color_diff = right.color1 - right.color0;
 
-        fn drawScanLine(render_pass: Pass, left: @This(), right: @This(), y: usize) void {
-            const min_x = @as(i32, @intFromFloat(@max(@ceil(left.x), 0)));
-            const max_x = @as(i32, @intFromFloat(@min(@ceil(right.x), @as(f32, @floatFromInt(render_pass.color_image.width)))));
+            var factor0: f32 = @as(f32, @floatFromInt(right.p0[1] - left.p0[1])) / @as(f32, @floatFromInt(left_y_diff));
+            const factor_step_0 = 1 / @as(f32, @floatFromInt(left_y_diff));
+            var factor1: f32 = 0;
+            const factor_step_1 = 1 / @as(f32, @floatFromInt(right_y_diff));
 
-            var x = min_x;
+            var y: isize = right.p0[1];
 
-            const min_color = left.color;
-            const max_color = right.color;
-
-            var interpolant: f32 = 0;
-            var interpolation_step = 1 / @as(f32, @floatFromInt(max_x - min_x));
-
-            while (x < max_x) : ({
-                x += 1;
-                interpolant += interpolation_step;
-            }) {
-                const color = vectorLerp(f32, 4, min_color, max_color, @splat(interpolant));
-
-                render_pass.color_image.setPixel(
-                    .{
-                        .x = @as(u32, @intCast(x)),
-                        .y = y,
-                    },
-                    Image.Color.fromNormalized(color),
+            while (y < right.p1[1]) : (y += 1) {
+                drawSpan(
+                    render_pass,
+                    @This().init(
+                        left.p0[0] + @as(isize, @intFromFloat(@trunc(@as(f32, @floatFromInt(left_x_diff)) * factor0))),
+                        right.p0[0] + @as(isize, @intFromFloat(@trunc(@as(f32, @floatFromInt(right_x_diff)) * factor1))),
+                        left.color0 + left_color_diff * @as(@Vector(4, f32), @splat(factor0)),
+                        right.color0 + right_color_diff * @as(@Vector(4, f32), @splat(factor1)),
+                    ),
+                    @intCast(y),
                 );
+
+                factor0 += factor_step_0;
+                factor1 += factor_step_1;
+            }
+        }
+
+        fn drawSpan(render_pass: Pass, span: @This(), y: usize) void {
+            const xdiff = span.x1 - span.x0;
+
+            if (xdiff == 0) return;
+
+            const colordiff = span.color1 - span.color0;
+
+            var factor: f32 = 0;
+            const factor_step = 1 / @as(f32, @floatFromInt(xdiff));
+
+            var x: isize = span.x0;
+
+            while (x < span.x1) : (x += 1) {
+                if (!(x < 0 or
+                    y < 0 or
+                    x >= render_pass.color_image.width or
+                    y >= render_pass.color_image.height))
+                {
+                    render_pass.color_image.setPixel(
+                        .{ .x = @intCast(x), .y = @intCast(y) },
+                        Image.Color.fromNormalized(span.color0 + (colordiff * @as(@Vector(4, f32), @splat(factor)))),
+                    );
+                }
+
+                factor += factor_step;
             }
         }
     };
@@ -447,53 +440,41 @@ fn scanTriangle(
         .{ 0, 0, 1, 1 },
     };
 
-    const top_bottom = Edge.init(min, max, colors[0]);
-    const top_middle = Edge.init(min, mid, colors[2]);
-    const middle_bottom = Edge.init(mid, max, colors[1]);
+    const view_scale = @Vector(2, f32){
+        @as(f32, @floatFromInt(pass.color_image.width)),
+        @as(f32, @floatFromInt(pass.color_image.height)),
+    };
 
-    var left = top_bottom;
-    var right = top_middle;
+    const p0_orig = (points[0] + @Vector(2, f32){ 1, 1 }) / @Vector(2, f32){ 2, 2 } * view_scale;
+    const p1_orig = (points[1] + @Vector(2, f32){ 1, 1 }) / @Vector(2, f32){ 2, 2 } * view_scale;
+    const p2_orig = (points[2] + @Vector(2, f32){ 1, 1 }) / @Vector(2, f32){ 2, 2 } * view_scale;
 
-    if (handedness) {
-        const temp = left;
-        left = right;
-        right = temp;
+    const p0 = @Vector(2, isize){ @intFromFloat(p0_orig[0]), @intFromFloat(p0_orig[1]) };
+    const p1 = @Vector(2, isize){ @intFromFloat(p1_orig[0]), @intFromFloat(p1_orig[1]) };
+    const p2 = @Vector(2, isize){ @intFromFloat(p2_orig[0]), @intFromFloat(p2_orig[1]) };
+
+    const edges: [3]Edge = .{
+        Edge.init(p0, p1, colors[0], colors[1]),
+        Edge.init(p1, p2, colors[1], colors[2]),
+        Edge.init(p2, p0, colors[2], colors[0]),
+    };
+
+    var max_length: usize = 0;
+    var long_edge_index: usize = 0;
+
+    for (edges, 0..) |edge, i| {
+        const length = edge.p1[1] - edge.p0[1];
+        if (length > max_length) {
+            max_length = std.math.absCast(length);
+            long_edge_index = i;
+        }
     }
 
-    var start_y = top_middle.start_y;
-    var end_y = @min(top_middle.end_y, @as(f32, @floatFromInt(pass.color_image.height)));
+    const short_edge_1: usize = (long_edge_index + 1) % 3;
+    const short_edge_2: usize = (long_edge_index + 2) % 3;
 
-    var y = start_y;
-
-    while (y < end_y) : (y += 1) {
-        Edge.drawScanLine(pass, left, right, @as(usize, @intFromFloat(@ceil(y))));
-
-        left.step();
-        right.step();
-    }
-
-    left = top_bottom;
-    right = middle_bottom;
-
-    if (true) return;
-
-    if (handedness) {
-        const temp = left;
-        left = right;
-        right = temp;
-    }
-
-    start_y = top_middle.start_y;
-    end_y = @min(middle_bottom.end_y, @as(f32, @floatFromInt(pass.color_image.height)));
-
-    y = start_y;
-
-    while (y < end_y) : (y += 1) {
-        Edge.drawScanLine(pass, left, right, @as(usize, @intFromFloat(@ceil(y))));
-
-        left.step();
-        right.step();
-    }
+    Span.drawScanLines(pass, edges[long_edge_index], edges[short_edge_1]);
+    Span.drawScanLines(pass, edges[long_edge_index], edges[short_edge_2]);
 }
 
 pub fn drawCircle(self: Renderer, pass: Pass, position: [2]f32, radius: f32) void {

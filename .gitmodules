@@ -4,3 +4,6 @@
 [submodule "lib/zgltf"]
 	path = lib/zgltf
 	url = https://github.com/zkburke/zgltf.git
+[submodule "lib/zalgebra"]
+	path = lib/zalgebra
+	url = https://github.com/kooparse/zalgebra.git
