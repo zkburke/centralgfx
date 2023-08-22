@@ -48,10 +48,10 @@ fn testVertexShader(
 ) struct { @Vector(3, f32), TestPipelineFragmentInput } {
     const vertex = uniform.vertices[vertex_index];
 
-    var output: TestPipelineFragmentInput = undefined;
-
-    output.color = vertex.color;
-    output.uv = vertex.uv;
+    const output: TestPipelineFragmentInput = .{
+        .color = vertex.color,
+        .uv = vertex.uv,
+    };
 
     return .{ .{ vertex.position[0], vertex.position[1], 0 }, output };
 }
@@ -220,16 +220,16 @@ pub fn main() !void {
             };
 
             if (enable_raster_pass) {
-                var tris = [_][3][2]f32{
+                var tris = [_][3][3]f32{
                     .{
-                        .{ -0.5, 0.5 },
-                        .{ 0.5, 0.5 },
-                        .{ 0.0, -0.5 },
+                        .{ -0.5, 0.5, 0 },
+                        .{ 0.5, 0.5, 0 },
+                        .{ 0.0, -0.5, 0 },
                     },
                     .{
-                        .{ -0.5, -0.5 },
-                        .{ 0.5, -0.5 },
-                        .{ 0.0, 0.5 },
+                        .{ -0.5, -0.5, 0 },
+                        .{ 0.5, -0.5, 0 },
+                        .{ 0.0, 0.5, 0 },
                     },
                 };
 
@@ -237,10 +237,17 @@ pub fn main() !void {
                     vertex[0] += @sin(time_s);
                 };
 
-                renderer.drawLinedTriangles(render_pass, &tris);
+                // renderer.drawLinedTriangles(render_pass, &tris);
 
                 for (tris) |tri| {
-                    renderer.drawTriangle(render_pass, .{ .{ tri[0][0] + @sin(time_s), tri[0][1] }, .{ tri[1][0] + @sin(time_s), tri[1][1] }, tri[2] });
+                    renderer.drawTriangle(
+                        render_pass,
+                        .{
+                            .{ tri[0][0] + @sin(time_s), tri[0][1], tri[0][2] },
+                            .{ tri[1][0] + @sin(time_s), tri[1][1], tri[1][2] },
+                            tri[2],
+                        },
+                    );
                 }
 
                 var line_vertices = [_]TestVertex{ .{
@@ -268,17 +275,45 @@ pub fn main() !void {
 
                 renderer.drawLinePipeline(render_pass, uniforms, line_vertices.len, TestPipeline);
 
-                var triangle = [3]@Vector(2, f32){
-                    .{ -0.5, 0.5 },
-                    .{ 0.5, 0.5 },
-                    .{ 0, -0.5 },
+                var triangle = [3]@Vector(3, f32){
+                    .{ -0.5, 0.5, 0 },
+                    .{ 0.5, 0.5, 0 },
+                    .{ 0, -0.5, 0 },
+                };
+
+                var triangle_vertices = [_]TestVertex{
+                    .{
+                        .position = .{ -0.5, 0.5 },
+                        .color = .{ 1, 0, 0, 1 },
+                        .uv = .{ 0, 0 },
+                    },
+                    .{
+                        .position = .{ 0.5, 0.5 },
+                        .color = .{ 0, 1, 0, 1 },
+                        .uv = .{ 1, 0 },
+                    },
+                    .{
+                        .position = .{ 0, -0.5 },
+                        .color = .{ 0, 0, 1, 1 },
+                        .uv = .{ 0.5, 1.0 },
+                    },
                 };
 
                 for (&triangle) |*vertex| {
-                    vertex.* = (vertex.* + @as(@Vector(2, f32), @splat(@as(f32, 1)))) / @as(@Vector(2, f32), @splat(@as(f32, 2)));
+                    vertex.* = (vertex.* + @as(@Vector(3, f32), @splat(@as(f32, 1)))) / @as(@Vector(3, f32), @splat(@as(f32, 2)));
                 }
 
                 renderer.drawTriangle(render_pass, triangle);
+
+                renderer.pipelineDrawTriangles(
+                    render_pass,
+                    .{
+                        .texture = cog_image,
+                        .vertices = &triangle_vertices,
+                    },
+                    1,
+                    TestPipeline,
+                );
 
                 Image.mappedBlit(.{
                     .x = @as(usize, @intFromFloat(@fabs(@sin(time_s) * @as(f32, @floatFromInt(render_target.width))))),
@@ -319,7 +354,7 @@ pub fn main() !void {
         const frame_end_time = std.time.microTimestamp();
         const frame_time = frame_end_time - frame_start_time;
 
-        std.log.info("frame_time: {d:.2}ms", .{@as(f32, @floatFromInt(frame_time)) / 1000});
+        std.log.err("frame_time: {d:.2}ms", .{@as(f32, @floatFromInt(frame_time)) / 1000});
 
         renderer.presentImage(render_target);
     }

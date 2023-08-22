@@ -149,20 +149,291 @@ pub fn Pipeline(
 
 // }
 
-///Draws a triangle using rasterisation, supplying a compile time known pipeline
-///Of operation functions
-pub fn drawTrianglePipeline(
+fn transformClipToFragmentSpace(width: usize, height: usize, point: @Vector(3, f32)) @Vector(2, usize) {
+    _ = height;
+    _ = width;
+    _ = point;
+}
+
+fn transformFragmentToClipSpace(width: usize, height: usize, point: @Vector(2, usize)) @Vector(3, f32) {
+    _ = height;
+    _ = width;
+    _ = point;
+}
+
+pub fn pipelineDrawTriangles(
     self: Renderer,
     pass: Pass,
     uniform: anytype,
-    vertex_count: usize,
+    triangle_count: usize,
     comptime pipeline: anytype,
 ) void {
-    _ = pipeline;
+    for (0..triangle_count) |index| {
+        self.pipelineDrawTriangle(pass, uniform, index, pipeline);
+    }
+}
+
+///Draws a triangle using rasterisation, supplying a compile time known pipeline
+///Of operation functions
+pub fn pipelineDrawTriangle(
+    self: Renderer,
+    pass: Pass,
+    uniform: anytype,
+    triangle_index: usize,
+    comptime pipeline: anytype,
+) void {
     _ = self;
-    _ = pass;
-    _ = uniform;
-    _ = vertex_count;
+
+    var points: [3]@Vector(3, f32) = undefined;
+
+    const fragment_input_0 = pipeline.vertexShader(uniform, triangle_index * 3 + 0);
+    const fragment_input_1 = pipeline.vertexShader(uniform, triangle_index * 3 + 1);
+    const fragment_input_2 = pipeline.vertexShader(uniform, triangle_index * 3 + 2);
+
+    points[0] = fragment_input_0[0];
+    points[1] = fragment_input_1[0];
+    points[2] = fragment_input_2[0];
+
+    const Interpolators = pipeline.FragmentInput;
+
+    const Edge = struct {
+        p0: @Vector(3, isize),
+        p1: @Vector(3, isize),
+
+        interpolators0: Interpolators,
+        interpolators1: Interpolators,
+
+        pub fn init(
+            p0: @Vector(3, isize),
+            p1: @Vector(3, isize),
+            interpolators0: Interpolators,
+            interpolators1: Interpolators,
+        ) @This() {
+            if (p0[1] < p1[1]) {
+                return .{
+                    .p0 = p0,
+                    .p1 = p1,
+                    .interpolators0 = interpolators0,
+                    .interpolators1 = interpolators1,
+                };
+            } else {
+                return .{
+                    .p0 = p1,
+                    .p1 = p0,
+                    .interpolators0 = interpolators1,
+                    .interpolators1 = interpolators0,
+                };
+            }
+        }
+    };
+
+    const Span = struct {
+        x0: isize,
+        x1: isize,
+        z0: f32,
+        z1: f32,
+
+        interpolators0: Interpolators,
+        interpolators1: Interpolators,
+
+        pub fn init(
+            x0: isize,
+            x1: isize,
+            z0: f32,
+            z1: f32,
+            interpolators0: Interpolators,
+            interpolators1: Interpolators,
+        ) @This() {
+            if (x0 < x1) {
+                return .{
+                    .x0 = x0,
+                    .x1 = x1,
+                    .z0 = z0,
+                    .z1 = z1,
+                    .interpolators0 = interpolators0,
+                    .interpolators1 = interpolators1,
+                };
+            } else {
+                return .{
+                    .x0 = x1,
+                    .x1 = x0,
+                    .z0 = z1,
+                    .z1 = z0,
+                    .interpolators0 = interpolators1,
+                    .interpolators1 = interpolators0,
+                };
+            }
+        }
+
+        fn drawEdges(render_pass: Pass, _uniform: anytype, left: Edge, right: Edge) void {
+            const left_y_diff = left.p1[1] - left.p0[1];
+
+            if (left_y_diff == 0) return;
+
+            const right_y_diff = right.p1[1] - right.p0[1];
+
+            if (right_y_diff == 0) return;
+
+            const left_x_diff = left.p1[0] - left.p0[0];
+            const right_x_diff = right.p1[0] - right.p0[0];
+
+            var left_interpolator_diffs: Interpolators = undefined;
+            var right_interpolator_diffs: Interpolators = undefined;
+
+            inline for (std.meta.fields(Interpolators)) |field| {
+                @field(left_interpolator_diffs, field.name) =
+                    @field(left.interpolators1, field.name) -
+                    @field(left.interpolators0, field.name);
+
+                @field(right_interpolator_diffs, field.name) =
+                    @field(right.interpolators1, field.name) -
+                    @field(right.interpolators0, field.name);
+            }
+
+            var factor0: f32 = @as(f32, @floatFromInt(right.p0[1] - left.p0[1])) / @as(f32, @floatFromInt(left_y_diff));
+            var factor1: f32 = 0;
+
+            const factor_step_0 = 1 / @as(f32, @floatFromInt(left_y_diff));
+            const factor_step_1 = 1 / @as(f32, @floatFromInt(right_y_diff));
+
+            var y: isize = right.p0[1];
+
+            while (y < right.p1[1]) : (y += 1) {
+                var span_interpolators0: Interpolators = undefined;
+                var span_interpolators1: Interpolators = undefined;
+
+                inline for (std.meta.fields(Interpolators)) |field| {
+                    const vector_factor0 = @as(field.type, @splat(factor0));
+                    const vector_factor1 = @as(field.type, @splat(factor1));
+
+                    @field(span_interpolators0, field.name) =
+                        @field(left.interpolators0, field.name) + @field(left_interpolator_diffs, field.name) * vector_factor0;
+
+                    @field(span_interpolators1, field.name) =
+                        @field(right.interpolators0, field.name) + @field(right_interpolator_diffs, field.name) * vector_factor1;
+                }
+
+                drawSpan(
+                    render_pass,
+                    _uniform,
+                    @This().init(
+                        left.p0[0] + @as(isize, @intFromFloat(@ceil(@as(f32, @floatFromInt(left_x_diff)) * factor0))),
+                        right.p0[0] + @as(isize, @intFromFloat(@ceil(@as(f32, @floatFromInt(right_x_diff)) * factor1))),
+                        0,
+                        0,
+                        span_interpolators0,
+                        span_interpolators1,
+                    ),
+                    @intCast(y),
+                );
+
+                factor0 += factor_step_0;
+                factor1 += factor_step_1;
+            }
+        }
+
+        fn drawSpan(render_pass: Pass, _uniform: anytype, span: @This(), y: usize) void {
+            const xdiff = span.x1 - span.x0;
+
+            if (xdiff == 0) return;
+
+            var interpolator_diffs: Interpolators = undefined;
+
+            inline for (std.meta.fields(Interpolators)) |field| {
+                @field(interpolator_diffs, field.name) =
+                    @field(span.interpolators1, field.name) - @field(span.interpolators0, field.name);
+            }
+
+            var factor: f32 = 0;
+            const factor_step = 1 / @as(f32, @floatFromInt(xdiff));
+
+            var x: isize = span.x0;
+
+            while (x < span.x1) : (x += 1) {
+                defer factor += factor_step;
+
+                if (x < 0 or
+                    y < 0 or
+                    x >= render_pass.color_image.width or
+                    y >= render_pass.color_image.height)
+                {
+                    continue;
+                }
+
+                //point in clip space
+                const point = @Vector(3, f32){
+                    @as(f32, @floatFromInt(x)) / @as(f32, @floatFromInt(render_pass.color_image.width)),
+                    @as(f32, @floatFromInt(y)) / @as(f32, @floatFromInt(render_pass.color_image.height)),
+                    0,
+                };
+
+                const fragment_index = @as(usize, @intCast(x)) + @as(usize, @intCast(y)) * render_pass.color_image.width;
+
+                const depth = &render_pass.depth_buffer[fragment_index];
+
+                if (depth.* <= point[2]) {
+                    continue;
+                }
+
+                depth.* = point[2];
+
+                const pixel = &render_pass.color_image.pixels[fragment_index];
+
+                var fragment_input: pipeline.FragmentInput = undefined;
+
+                inline for (std.meta.fields(Interpolators)) |field| {
+                    const factor_vector = @as(field.type, @splat(factor));
+
+                    @field(fragment_input, field.name) =
+                        @field(span.interpolators0, field.name) + (@field(interpolator_diffs, field.name) * factor_vector);
+                }
+
+                @call(.always_inline, pipeline.fragmentShader, .{
+                    _uniform,
+                    fragment_input,
+                    point,
+                    pixel,
+                });
+            }
+        }
+    };
+
+    const view_scale = @Vector(3, f32){
+        @as(f32, @floatFromInt(pass.color_image.width)),
+        @as(f32, @floatFromInt(pass.color_image.height)),
+        0,
+    };
+
+    const p0_orig = (points[0] + @Vector(3, f32){ 1, 1, 1 }) / @Vector(3, f32){ 2, 2, 2 } * view_scale;
+    const p1_orig = (points[1] + @Vector(3, f32){ 1, 1, 1 }) / @Vector(3, f32){ 2, 2, 2 } * view_scale;
+    const p2_orig = (points[2] + @Vector(3, f32){ 1, 1, 1 }) / @Vector(3, f32){ 2, 2, 2 } * view_scale;
+
+    const p0 = @Vector(3, isize){ @intFromFloat(p0_orig[0]), @intFromFloat(p0_orig[1]), @intFromFloat(p0_orig[2]) };
+    const p1 = @Vector(3, isize){ @intFromFloat(p1_orig[0]), @intFromFloat(p1_orig[1]), @intFromFloat(p1_orig[2]) };
+    const p2 = @Vector(3, isize){ @intFromFloat(p2_orig[0]), @intFromFloat(p2_orig[1]), @intFromFloat(p2_orig[2]) };
+
+    const edges: [3]Edge = .{
+        Edge.init(p0, p1, fragment_input_0[1], fragment_input_1[1]),
+        Edge.init(p1, p2, fragment_input_1[1], fragment_input_2[1]),
+        Edge.init(p2, p0, fragment_input_2[1], fragment_input_0[1]),
+    };
+
+    var max_length: usize = 0;
+    var long_edge_index: usize = 0;
+
+    for (edges, 0..) |edge, i| {
+        const length = edge.p1[1] - edge.p0[1];
+        if (length > max_length) {
+            max_length = std.math.absCast(length);
+            long_edge_index = i;
+        }
+    }
+
+    const short_edge_1: usize = (long_edge_index + 1) % 3;
+    const short_edge_2: usize = (long_edge_index + 2) % 3;
+
+    Span.drawEdges(pass, uniform, edges[long_edge_index], edges[short_edge_1]);
+    Span.drawEdges(pass, uniform, edges[long_edge_index], edges[short_edge_2]);
 }
 
 pub fn drawLinePipeline(
@@ -303,19 +574,19 @@ fn twoTriangleArea(triangle: [3]@Vector(2, f32)) f32 {
 pub fn drawTriangle(
     self: Renderer,
     pass: Pass,
-    points: [3]@Vector(2, f32),
+    points: [3]@Vector(3, f32),
 ) void {
     _ = self;
     const Edge = struct {
-        p0: @Vector(2, isize),
-        p1: @Vector(2, isize),
+        p0: @Vector(3, isize),
+        p1: @Vector(3, isize),
 
         color0: @Vector(4, f32),
         color1: @Vector(4, f32),
 
         pub fn init(
-            p0: @Vector(2, isize),
-            p1: @Vector(2, isize),
+            p0: @Vector(3, isize),
+            p1: @Vector(3, isize),
             color0: @Vector(4, f32),
             color1: @Vector(4, f32),
         ) @This() {
@@ -340,12 +611,16 @@ pub fn drawTriangle(
     const Span = struct {
         x0: isize,
         x1: isize,
+        z0: f32,
+        z1: f32,
         color0: @Vector(4, f32),
         color1: @Vector(4, f32),
 
         pub fn init(
             x0: isize,
             x1: isize,
+            z0: f32,
+            z1: f32,
             color0: @Vector(4, f32),
             color1: @Vector(4, f32),
         ) @This() {
@@ -353,6 +628,8 @@ pub fn drawTriangle(
                 return .{
                     .x0 = x0,
                     .x1 = x1,
+                    .z0 = z0,
+                    .z1 = z1,
                     .color0 = color0,
                     .color1 = color1,
                 };
@@ -360,6 +637,8 @@ pub fn drawTriangle(
                 return .{
                     .x0 = x1,
                     .x1 = x0,
+                    .z0 = z1,
+                    .z1 = z0,
                     .color0 = color1,
                     .color1 = color0,
                 };
@@ -385,6 +664,10 @@ pub fn drawTriangle(
             const factor_step_0 = 1 / @as(f32, @floatFromInt(left_y_diff));
             var factor1: f32 = 0;
             const factor_step_1 = 1 / @as(f32, @floatFromInt(right_y_diff));
+            var factor2: f32 = 0;
+            _ = factor2;
+            const factor_step_2 = 1 / @as(f32, @floatFromInt(right_y_diff));
+            _ = factor_step_2;
 
             var y: isize = right.p0[1];
 
@@ -394,6 +677,8 @@ pub fn drawTriangle(
                     @This().init(
                         left.p0[0] + @as(isize, @intFromFloat(@trunc(@as(f32, @floatFromInt(left_x_diff)) * factor0))),
                         right.p0[0] + @as(isize, @intFromFloat(@trunc(@as(f32, @floatFromInt(right_x_diff)) * factor1))),
+                        0,
+                        0,
                         left.color0 + left_color_diff * @as(@Vector(4, f32), @splat(factor0)),
                         right.color0 + right_color_diff * @as(@Vector(4, f32), @splat(factor1)),
                     ),
@@ -407,6 +692,8 @@ pub fn drawTriangle(
 
         fn drawSpan(render_pass: Pass, span: @This(), y: usize) void {
             const xdiff = span.x1 - span.x0;
+            const zdiff = span.x1 - span.x0;
+            _ = zdiff;
 
             if (xdiff == 0) return;
 
@@ -440,18 +727,19 @@ pub fn drawTriangle(
         .{ 0, 0, 1, 1 },
     };
 
-    const view_scale = @Vector(2, f32){
+    const view_scale = @Vector(3, f32){
         @as(f32, @floatFromInt(pass.color_image.width)),
         @as(f32, @floatFromInt(pass.color_image.height)),
+        0,
     };
 
-    const p0_orig = (points[0] + @Vector(2, f32){ 1, 1 }) / @Vector(2, f32){ 2, 2 } * view_scale;
-    const p1_orig = (points[1] + @Vector(2, f32){ 1, 1 }) / @Vector(2, f32){ 2, 2 } * view_scale;
-    const p2_orig = (points[2] + @Vector(2, f32){ 1, 1 }) / @Vector(2, f32){ 2, 2 } * view_scale;
+    const p0_orig = (points[0] + @Vector(3, f32){ 1, 1, 1 }) / @Vector(3, f32){ 2, 2, 2 } * view_scale;
+    const p1_orig = (points[1] + @Vector(3, f32){ 1, 1, 1 }) / @Vector(3, f32){ 2, 2, 2 } * view_scale;
+    const p2_orig = (points[2] + @Vector(3, f32){ 1, 1, 1 }) / @Vector(3, f32){ 2, 2, 2 } * view_scale;
 
-    const p0 = @Vector(2, isize){ @intFromFloat(p0_orig[0]), @intFromFloat(p0_orig[1]) };
-    const p1 = @Vector(2, isize){ @intFromFloat(p1_orig[0]), @intFromFloat(p1_orig[1]) };
-    const p2 = @Vector(2, isize){ @intFromFloat(p2_orig[0]), @intFromFloat(p2_orig[1]) };
+    const p0 = @Vector(3, isize){ @intFromFloat(p0_orig[0]), @intFromFloat(p0_orig[1]), @intFromFloat(p0_orig[2]) };
+    const p1 = @Vector(3, isize){ @intFromFloat(p1_orig[0]), @intFromFloat(p1_orig[1]), @intFromFloat(p1_orig[2]) };
+    const p2 = @Vector(3, isize){ @intFromFloat(p2_orig[0]), @intFromFloat(p2_orig[1]), @intFromFloat(p2_orig[2]) };
 
     const edges: [3]Edge = .{
         Edge.init(p0, p1, colors[0], colors[1]),
