@@ -135,19 +135,21 @@ pub fn Pipeline(
     };
 }
 
-// pub fn pipelineDraw(
-//     self: Renderer,
-//     pass: Pass,
-//     primitive_type: PrimitiveType,
-//     uniform: anytype,
-//     vertex_count: usize,
-//     FragmentInput: type,
-//     comptime vertexShader: anytype,
-//     comptime fragmentShader: anytype,
-//     ) void
-// {
-
-// }
+pub fn pipelineDraw(
+    self: Renderer,
+    pass: Pass,
+    primitive_type: PrimitiveType,
+    uniform: anytype,
+    vertex_count: usize,
+    comptime pipeline: type,
+) void {
+    _ = pipeline;
+    _ = vertex_count;
+    _ = uniform;
+    _ = primitive_type;
+    _ = pass;
+    _ = self;
+}
 
 fn transformClipToFragmentSpace(width: usize, height: usize, point: @Vector(3, f32)) @Vector(2, usize) {
     _ = height;
@@ -175,7 +177,7 @@ pub fn pipelineDrawTriangles(
 
 ///Draws a triangle using rasterisation, supplying a compile time known pipeline
 ///Of operation functions
-pub fn pipelineDrawTriangle(
+fn pipelineDrawTriangle(
     self: Renderer,
     pass: Pass,
     uniform: anytype,
@@ -436,7 +438,7 @@ pub fn pipelineDrawTriangle(
     Span.drawEdges(pass, uniform, edges[long_edge_index], edges[short_edge_2]);
 }
 
-pub fn drawLinePipeline(
+pub fn pipelineDrawLine(
     self: Renderer,
     pass: Pass,
     uniform: anytype,

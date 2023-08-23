@@ -5,7 +5,7 @@ const Image = @import("Image.zig");
 const Renderer = @import("Renderer.zig");
 const RayTracer = @import("RayTracer.zig");
 
-const cog_png = @embedFile("res/cog.png");
+const cog_png = @embedFile("res/wood_floor.png");
 
 const MeshCluster = struct {
     pub const vertex_count = 128;
@@ -16,7 +16,7 @@ const MeshCluster = struct {
 const TestPipelineClusterOutput = struct {};
 
 const TestVertex = struct {
-    position: @Vector(2, f32),
+    position: @Vector(3, f32),
     color: @Vector(4, f32),
     uv: @Vector(2, f32),
 };
@@ -53,7 +53,7 @@ fn testVertexShader(
         .uv = vertex.uv,
     };
 
-    return .{ .{ vertex.position[0], vertex.position[1], 0 }, output };
+    return .{ vertex.position, output };
 }
 
 fn testFragmentShader(
@@ -95,8 +95,8 @@ pub fn main() !void {
     const window_width = 640;
     const window_height = 480;
 
-    const surface_width = 640 / 4;
-    const surface_height = 480 / 4;
+    const surface_width = 640 / 2;
+    const surface_height = 480 / 2;
 
     var renderer: Renderer = undefined;
 
@@ -251,19 +251,19 @@ pub fn main() !void {
                 }
 
                 var line_vertices = [_]TestVertex{ .{
-                    .position = .{ -1.0 / 2.0, -1.0 / 2.0 },
+                    .position = .{ -1.0 / 2.0, -1.0 / 2.0, 0 },
                     .color = .{ 1, 1, 1, 1 },
                     .uv = .{ 0, 0 },
                 }, .{
-                    .position = .{ 1.0 / 2.0, 1.0 / 2.0 },
+                    .position = .{ 1.0 / 2.0, 1.0 / 2.0, 0 },
                     .color = .{ 1, 1, 1, 1 },
                     .uv = .{ 1, 1 },
                 }, .{
-                    .position = .{ (-1.0 / 2.0) + 0.25, (-1.0 / 2.0) },
+                    .position = .{ (-1.0 / 2.0) + 0.25, (-1.0 / 2.0), 0 },
                     .color = .{ 1, 0, 0, 1 },
                     .uv = .{ 0, 0 },
                 }, .{
-                    .position = .{ (1.0 / 2.0) + 0.25, (1.0 / 2.0) },
+                    .position = .{ (1.0 / 2.0) + 0.25, (1.0 / 2.0), 0 },
                     .color = .{ 0, 1, 0, 1 },
                     .uv = .{ 1, 1 },
                 } };
@@ -273,7 +273,7 @@ pub fn main() !void {
                     .vertices = &line_vertices,
                 };
 
-                renderer.drawLinePipeline(render_pass, uniforms, line_vertices.len, TestPipeline);
+                renderer.pipelineDrawLine(render_pass, uniforms, line_vertices.len, TestPipeline);
 
                 var triangle = [3]@Vector(3, f32){
                     .{ -0.5, 0.5, 0 },
@@ -283,21 +283,23 @@ pub fn main() !void {
 
                 var triangle_vertices = [_]TestVertex{
                     .{
-                        .position = .{ -0.5, 0.5 },
+                        .position = .{ -0.5, 0.5, 0 },
                         .color = .{ 1, 0, 0, 1 },
                         .uv = .{ 0, 0 },
                     },
                     .{
-                        .position = .{ 0.5, 0.5 },
+                        .position = .{ 0.5, 0.5, 0 },
                         .color = .{ 0, 1, 0, 1 },
                         .uv = .{ 1, 0 },
                     },
                     .{
-                        .position = .{ 0, -0.5 },
+                        .position = .{ 0, -0.5, 0 },
                         .color = .{ 0, 0, 1, 1 },
                         .uv = .{ 0.5, 1.0 },
                     },
                 };
+
+                triangle_vertices[0].position[1] += @sin(time_s);
 
                 for (&triangle) |*vertex| {
                     vertex.* = (vertex.* + @as(@Vector(3, f32), @splat(@as(f32, 1)))) / @as(@Vector(3, f32), @splat(@as(f32, 2)));
@@ -314,11 +316,6 @@ pub fn main() !void {
                     1,
                     TestPipeline,
                 );
-
-                Image.mappedBlit(.{
-                    .x = @as(usize, @intFromFloat(@fabs(@sin(time_s) * @as(f32, @floatFromInt(render_target.width))))),
-                    .y = 200,
-                }, .{ .x = 8, .y = 8 }, cog_image, render_target);
             }
 
             if (enable_ray_pass) {
