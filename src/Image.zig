@@ -1,6 +1,41 @@
 const std = @import("std");
 const Image = @This();
 
+///Size of a page in bytes
+const page_size: usize = std.mem.page_size;
+///Size of a cache line in bytes
+const cache_line_size: usize = 64;
+
+pub const TileSize = enum {
+    @"4x4",
+    @"8x8",
+    @"16x16",
+    @"32x32",
+    @"64x64",
+};
+
+pub const PixelFormat = enum {
+    r8_uint,
+    rg16_uint,
+    rgba32_uint,
+    rgba64_uint,
+    r32_uint,
+    r32_sfloat,
+};
+
+pub const ImageLayout = enum {
+    ///Image is stored as a sequence of rows
+    linear,
+    ///Image is stored as a sequence of fixed sized, square tiles
+    tiled,
+};
+
+pub const ImageFormat = struct {
+    pixel_format: PixelFormat,
+    layout: ImageLayout,
+    tile_size: TileSize,
+};
+
 pub const Color = struct {
     r: u8 = 0,
     g: u8 = 0,
@@ -9,6 +44,8 @@ pub const Color = struct {
 
     pub fn fromNormalized(rgba: @Vector(4, f32)) Color {
         const scaled: @Vector(4, f32) = rgba * @as(@Vector(4, f32), @splat(@as(f32, std.math.maxInt(u8))));
+
+        @setRuntimeSafety(false);
 
         return .{
             .r = @as(u8, @intFromFloat(scaled[0])),
@@ -52,59 +89,95 @@ pub const Color = struct {
     }
 };
 
-pixels: []Color,
+///tile width and height in pixels
+const tile_width = 4;
+const tile_height = tile_width;
+
+texel_buffer: []Color align(page_size),
 width: usize,
 height: usize,
 
+pub fn init(allocator: std.mem.Allocator, width: usize, height: usize) !Image {
+    const tiles_x = std.math.divCeil(usize, width, tile_width) catch unreachable;
+    const tiles_y = std.math.divCeil(usize, height, tile_height) catch unreachable;
+
+    const texel_buffer_size = tiles_x * tile_width * tiles_y * tile_height;
+
+    const texel_buffer = try allocator.alignedAlloc(Color, page_size, texel_buffer_size);
+    errdefer allocator.free(texel_buffer);
+
+    return .{
+        .texel_buffer = texel_buffer,
+        .width = width,
+        .height = height,
+    };
+}
+
+pub fn deinit(self: *Image, allocator: std.mem.Allocator) void {
+    defer self.* = undefined;
+    defer allocator.free(self.texel_buffer);
+}
+
+///Create and allocate a tiled image from a linear image
+pub fn initFromLinear(
+    allocator: std.mem.Allocator,
+    image_pixels: []const Color,
+    width: usize,
+    height: usize,
+) !Image {
+    const image = try init(allocator, width, height);
+
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const pixel = image.texelFetch(.{ x, y });
+
+            pixel.* = image_pixels[x + y * width];
+        }
+    }
+
+    return image;
+}
+
+pub fn clear(self: Image, color: Color) void {
+    @memset(self.texel_buffer, color);
+}
+
+pub fn copy(destination: Image, source: Image) void {
+    @memcpy(destination.texel_buffer, source.texel_buffer);
+}
+
+pub fn texelFetch(self: Image, position: struct { x: usize, y: usize }) *Color {
+    const tile_count_x = std.math.divCeil(usize, self.width, tile_width) catch unreachable;
+
+    const tile_x = @divFloor(position.x, tile_width);
+    const tile_y = @divFloor(position.y, tile_height);
+
+    const tile_begin_x = tile_x * tile_width;
+    const tile_begin_y = tile_y * tile_height;
+
+    const tile_pointer: [*]Color = @ptrCast(&self.texel_buffer[(tile_x + tile_y * tile_count_x) * (tile_width * tile_height)]);
+
+    //x, y relative to tile
+    const x = position.x - tile_begin_x;
+    const y = position.y - tile_begin_y;
+
+    return &tile_pointer[x + y * tile_width];
+}
+
 pub fn setPixel(self: Image, position: struct { x: usize, y: usize }, color: Color) void {
-    self.pixels[position.x + self.width * position.y] = color;
-}
-
-pub fn blit(position: struct { x: usize, y: usize }, source: Image, destination: Image) void {
-    for (0..source.height) |y| {
-        const destination_index = position.x + destination.width * (position.y + y);
-
-        @memcpy(destination.pixels[destination_index..], source.pixels);
-    }
-}
-
-pub fn blendedBlit(position: struct { x: usize, y: usize }, source: Image, destination: Image) void {
-    var y: usize = 0;
-
-    while (y < source.height and position.y + y < destination.height) : (y += 1) {
-        var x: usize = 0;
-
-        while (x < source.width and position.x + x < destination.width) : (x += 1) {
-            const source_index = x + source.width * y;
-            const destination_index = position.x + x + destination.width * (position.y + y);
-
-            destination.pixels[destination_index] = destination.pixels[destination_index].blend(source.pixels[source_index]);
-        }
-    }
-}
-
-pub fn mappedBlit(position: struct { x: usize, y: usize }, scale: struct { x: usize, y: usize }, source: Image, destination: Image) void {
-    var y: usize = 0;
-
-    const true_width = source.width * scale.x;
-    const true_height = source.height * scale.y;
-
-    while (y < true_height and position.y + y < destination.height) : (y += 1) {
-        var x: usize = 0;
-
-        while (x < true_width and position.x + x < destination.width) : (x += 1) {
-            const source_index = ((x % source.width) + source.width * (y % source.height));
-            const destination_index = position.x + x + destination.width * (position.y + y);
-
-            destination.pixels[destination_index] = destination.pixels[destination_index].blend(source.pixels[source_index]);
-        }
-    }
+    self.texelFetch(.{ position.x, position.y }).* = color;
 }
 
 pub fn affineSample(self: Image, uv: @Vector(2, f32)) Color {
+    @setRuntimeSafety(false);
+
     const scaled_uv = uv * @Vector(2, f32){ @as(f32, @floatFromInt(self.width)), @as(f32, @floatFromInt(self.height)) };
     const x = @as(usize, @intFromFloat(scaled_uv[0]));
     const y = @as(usize, @intFromFloat(scaled_uv[1]));
 
-    return self.pixels[x + self.width * y];
+    if (x >= self.width or y >= self.height) {
+        return Color.fromNormalized(.{ 0, 0, 0, 0 });
+    }
+
+    return self.texelFetch(.{ x, y }).*;
 }

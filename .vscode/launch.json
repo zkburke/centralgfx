@@ -1,0 +1,14 @@
+{
+    "configurations": [
+        {
+            "name": "centralgfx",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/zig-out/bin/centralgfx",
+            "args": [],
+            "cwd": "${workspaceFolder}/zig-out/bin/",
+            "internalConsoleOptions": "neverOpen",
+            "preLaunchTask": "build",
+        }
+    ]
+}

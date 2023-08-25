@@ -7,8 +7,17 @@ const Renderer = @This();
 window: ?*c.SDL_Window = null,
 sdl_renderer: ?*c.SDL_Renderer = null,
 sdl_texture: ?*c.SDL_Texture = null,
+swapchain_image: []Image.Color,
 
-pub fn init(self: *Renderer, window_width: usize, window_height: usize, surface_width: usize, surface_height: usize, title: []const u8) !void {
+pub fn init(
+    self: *Renderer,
+    allocator: std.mem.Allocator,
+    window_width: usize,
+    window_height: usize,
+    surface_width: usize,
+    surface_height: usize,
+    title: []const u8,
+) !void {
     if (c.SDL_Init(c.SDL_INIT_VIDEO) != 0) {
         return error.FailedToCreateWindow;
     }
@@ -24,12 +33,15 @@ pub fn init(self: *Renderer, window_width: usize, window_height: usize, surface_
 
     self.sdl_renderer = c.SDL_CreateRenderer(self.window, -1, c.SDL_RENDERER_ACCELERATED);
     self.sdl_texture = c.SDL_CreateTexture(self.sdl_renderer, c.SDL_PIXELFORMAT_ABGR8888, c.SDL_TEXTUREACCESS_STREAMING, @as(c_int, @intCast(surface_width)), @as(c_int, @intCast(surface_height)));
+
+    self.swapchain_image = try allocator.alloc(Image.Color, surface_width * surface_height);
 }
 
-pub fn deinit(self: Renderer) void {
+pub fn deinit(self: Renderer, allocator: std.mem.Allocator) void {
     defer c.SDL_DestroyWindow(self.window);
     defer c.SDL_DestroyRenderer(self.sdl_renderer);
     defer c.SDL_DestroyTexture(self.sdl_texture);
+    defer allocator.free(self.swapchain_image);
 }
 
 pub fn shouldWindowClose(self: Renderer) bool {
@@ -175,8 +187,164 @@ pub fn pipelineDrawTriangles(
     }
 }
 
-///Draws a triangle using rasterisation, supplying a compile time known pipeline
-///Of operation functions
+const ClippingPlane = struct {
+    normal: @Vector(3, f32),
+    d: f32 = 0,
+};
+
+fn vectorDotGeneric3D(comptime N: comptime_int, comptime T: type, a: @Vector(N, T), b: @Vector(N, T)) T {
+    return @reduce(.Add, a * b);
+}
+
+fn vectorDot(a: @Vector(3, f32), b: @Vector(3, f32)) f32 {
+    return @reduce(.Add, a * b);
+}
+
+fn signedDistance(plane: ClippingPlane, vertex: @Vector(3, f32)) f32 {
+    return vectorDot(plane.normal, vertex) + plane.d;
+}
+
+fn planeLineIntersection(plane: ClippingPlane, line: [2]@Vector(3, f32)) @Vector(3, f32) {
+    const u = line[1] - line[0];
+    const dot = vectorDot(plane.normal, u);
+
+    if (@fabs(dot) > 1e-6) {
+        const w = line[0] - @as(@Vector(3, f32), @splat(plane.d));
+        const frac = -vectorDot(plane.normal, w) / dot;
+
+        return line[0] + u * @as(@Vector(3, f32), @splat(frac));
+    }
+
+    return .{ 0, 0, 0 };
+}
+
+const TriangleClipResult = union(enum) {
+    ///The triangle is discarded
+    discarded,
+    ///A single triangle is produced
+    single: [3]@Vector(3, f32),
+    ///Two triangles are produced
+    double: [2][3]@Vector(3, f32),
+};
+
+fn clipTriangleAgainstPlane(plane: ClippingPlane, triangle: [3]@Vector(3, f32)) TriangleClipResult {
+    const S = struct {
+
+        //returns the index of the only positive param, or null
+        pub fn onlyPositive(x: f32, y: f32, z: f32) ?usize {
+            if (x > 0 and (y <= 0 and z <= 0)) {
+                return 0;
+            }
+
+            if (y > 0 and (x <= 0 and z <= 0)) {
+                return 1;
+            }
+
+            if (z > 0 and (x <= 0 and y <= 0)) {
+                return 2;
+            }
+
+            return null;
+        }
+
+        //returns the index of the only negative param, or null
+        pub fn onlyNegative(x: f32, y: f32, z: f32) ?usize {
+            if (x < 0 and (y >= 0 and z >= 0)) {
+                return 0;
+            }
+
+            if (y < 0 and (x >= 0 and z >= 0)) {
+                return 1;
+            }
+
+            if (z < 0 and (x >= 0 and y >= 0)) {
+                return 2;
+            }
+
+            return null;
+        }
+    };
+
+    const d0 = signedDistance(plane, triangle[0]);
+    const d1 = signedDistance(plane, triangle[1]);
+    const d2 = signedDistance(plane, triangle[2]);
+
+    if (d0 > 0 and d1 > 0 and d2 > 0) {
+        return .{ .single = triangle };
+    } else if (d0 < 0 and d1 < 0 and d2 < 0) {
+        return .discarded;
+    } else if (S.onlyPositive(d0, d1, d2)) |a_index| {
+        const a = triangle[a_index]; //positive vertex
+        const b_prime = planeLineIntersection(plane, .{ triangle[0], triangle[1] });
+        const c_prime = planeLineIntersection(plane, .{ triangle[0], triangle[2] });
+
+        return .{ .single = .{ a, b_prime, c_prime } };
+    } else if (S.onlyNegative(d0, d1, d2)) |c_index| {
+        const _c = triangle[c_index];
+        const a_prime = planeLineIntersection(plane, .{ triangle[0], _c });
+        const b_prime = planeLineIntersection(plane, .{ triangle[1], _c });
+
+        return .{ .double = .{
+            .{ triangle[0], triangle[1], a_prime },
+            .{ a_prime, triangle[1], b_prime },
+        } };
+    }
+
+    return .{ .single = triangle };
+}
+
+///Clips the triangle against all planes and returns the clipped triangles
+///The upper bound for the number of triangles produced is equal to the number of intersecting,
+///or touching planes. If a triangle is clipped in the corner of a 3D clip volume,
+///A 5 sided polygon can be produced. Hence why [plane_count]TriangleClipResult is returned
+fn clipTriangleAgainstPlanes(
+    comptime plane_count: comptime_int,
+    planes: [plane_count]ClippingPlane,
+    triangle: [3]@Vector(3, f32),
+) [plane_count * 2]TriangleClipResult {
+    var result: [plane_count * 2]TriangleClipResult = [_]TriangleClipResult{.discarded} ** (plane_count * 2);
+    var result_count: usize = 1;
+
+    result[0] = clipTriangleAgainstPlane(planes[0], triangle);
+
+    for (planes[1..], 1..) |plane, index| {
+        const previous_result = result[index - 1];
+
+        switch (previous_result) {
+            .discarded => break,
+            .single => |result_triangle| {
+                result[result_count] = clipTriangleAgainstPlane(plane, result_triangle);
+                result_count += 1;
+            },
+            .double => |result_triangles| {
+                for (result_triangles) |result_triangle| {
+                    result[result_count] = clipTriangleAgainstPlane(plane, result_triangle);
+                    result_count += 1;
+                }
+            },
+        }
+    }
+
+    return result;
+}
+
+fn calculateBarycentrics(triangle: [3]@Vector(3, f32), point: @Vector(3, f32)) @Vector(3, f32) {
+    const area_abc = vectorLength(vectorCross3D(triangle[1] - triangle[0], triangle[2] - triangle[0]));
+
+    const area_pbc = vectorLength(vectorCross3D(triangle[1] - point, triangle[2] - point));
+    const area_pca = vectorLength(vectorCross3D(triangle[2] - point, triangle[0] - point));
+
+    var bary: @Vector(3, f32) = .{
+        area_pbc / area_abc,
+        area_pca / area_abc,
+        0,
+    };
+
+    bary[2] = 1 - bary[0] - bary[1];
+
+    return bary;
+}
+
 fn pipelineDrawTriangle(
     self: Renderer,
     pass: Pass,
@@ -184,23 +352,93 @@ fn pipelineDrawTriangle(
     triangle_index: usize,
     comptime pipeline: anytype,
 ) void {
-    _ = self;
-
-    var points: [3]@Vector(3, f32) = undefined;
-
     const fragment_input_0 = pipeline.vertexShader(uniform, triangle_index * 3 + 0);
     const fragment_input_1 = pipeline.vertexShader(uniform, triangle_index * 3 + 1);
     const fragment_input_2 = pipeline.vertexShader(uniform, triangle_index * 3 + 2);
 
-    points[0] = fragment_input_0[0];
-    points[1] = fragment_input_1[0];
-    points[2] = fragment_input_2[0];
+    const clip_results = clipTriangleAgainstPlanes(5, .{
+        //near
+        .{
+            .normal = .{ 0, 0, 1 },
+            .d = 0,
+        },
+        //left
+        .{
+            .normal = .{ 1 / @sqrt(@as(f32, 2)), 0, 1 / @sqrt(@as(f32, 2)) },
+            .d = 0,
+        },
+        //right
+        .{
+            .normal = .{ -1 / @sqrt(@as(f32, 2)), 0, @sqrt(@as(f32, 2)) },
+            .d = 0,
+        },
+        //top
+        .{
+            .normal = .{ 0, 1 / @sqrt(@as(f32, 2)), 1 / @sqrt(@as(f32, 2)) },
+            .d = 0,
+        },
+        //bottom
+        .{
+            .normal = .{ 0, -1 / @sqrt(@as(f32, 2)), @sqrt(@as(f32, 2)) },
+            .d = 0,
+        },
+    }, .{ fragment_input_0[0], fragment_input_1[0], fragment_input_2[0] });
+
+    for (clip_results) |clip_result| {
+        switch (clip_result) {
+            .discarded => break,
+            .single => |points| {
+                self.pipelineRasteriseTriangle(
+                    pipeline,
+                    pass,
+                    uniform,
+                    points,
+                    .{
+                        fragment_input_0[1],
+                        fragment_input_1[1],
+                        fragment_input_2[1],
+                    },
+                );
+            },
+            .double => |triangles| {
+                for (triangles) |points| {
+                    self.pipelineRasteriseTriangle(
+                        pipeline,
+                        pass,
+                        uniform,
+                        points,
+                        .{
+                            fragment_input_0[1],
+                            fragment_input_1[1],
+                            fragment_input_2[1],
+                        },
+                    );
+                }
+            },
+        }
+    }
+}
+
+///Draws a triangle using rasterisation, supplying a compile time known pipeline
+///Of operation functions
+///Assumes that points is entirely contained within the clip volume
+fn pipelineRasteriseTriangle(
+    self: Renderer,
+    comptime pipeline: anytype,
+    pass: Pass,
+    uniform: anytype,
+    points: [3]@Vector(3, f32),
+    fragment_inputs: [3]pipeline.FragmentInput,
+) void {
+    _ = self;
 
     const Interpolators = pipeline.FragmentInput;
 
     const Edge = struct {
         p0: @Vector(3, isize),
         p1: @Vector(3, isize),
+        z0: f32,
+        z1: f32,
 
         interpolators0: Interpolators,
         interpolators1: Interpolators,
@@ -208,6 +446,8 @@ fn pipelineDrawTriangle(
         pub fn init(
             p0: @Vector(3, isize),
             p1: @Vector(3, isize),
+            z0: f32,
+            z1: f32,
             interpolators0: Interpolators,
             interpolators1: Interpolators,
         ) @This() {
@@ -215,6 +455,8 @@ fn pipelineDrawTriangle(
                 return .{
                     .p0 = p0,
                     .p1 = p1,
+                    .z0 = z0,
+                    .z1 = z1,
                     .interpolators0 = interpolators0,
                     .interpolators1 = interpolators1,
                 };
@@ -222,6 +464,8 @@ fn pipelineDrawTriangle(
                 return .{
                     .p0 = p1,
                     .p1 = p0,
+                    .z0 = z1,
+                    .z1 = z0,
                     .interpolators0 = interpolators1,
                     .interpolators1 = interpolators0,
                 };
@@ -267,7 +511,15 @@ fn pipelineDrawTriangle(
             }
         }
 
-        fn drawEdges(render_pass: Pass, _uniform: anytype, left: Edge, right: Edge) void {
+        fn drawEdges(
+            render_pass: Pass,
+            _uniform: anytype,
+            triangle: [3]@Vector(3, f32),
+            triangle_attributes: [3]pipeline.FragmentInput,
+            twice_triangle_area: f32,
+            left: Edge,
+            right: Edge,
+        ) void {
             const left_y_diff = left.p1[1] - left.p0[1];
 
             if (left_y_diff == 0) return;
@@ -278,6 +530,9 @@ fn pipelineDrawTriangle(
 
             const left_x_diff = left.p1[0] - left.p0[0];
             const right_x_diff = right.p1[0] - right.p0[0];
+
+            const left_z_diff = left.z1 - left.z0;
+            const right_z_diff = right.z1 - right.z0;
 
             var left_interpolator_diffs: Interpolators = undefined;
             var right_interpolator_diffs: Interpolators = undefined;
@@ -298,9 +553,23 @@ fn pipelineDrawTriangle(
             const factor_step_0 = 1 / @as(f32, @floatFromInt(left_y_diff));
             const factor_step_1 = 1 / @as(f32, @floatFromInt(right_y_diff));
 
-            var y: isize = right.p0[1];
+            var z_factor0: f32 = (right.z0 - left.z0) / left_z_diff;
+            var z_factor1: f32 = 0;
 
-            while (y < right.p1[1]) : (y += 1) {
+            const z_factor_step0 = 1 / left_z_diff;
+            const z_factor_step1 = 1 / right_z_diff;
+
+            var pixel_y: isize = right.p0[1];
+
+            while (pixel_y < right.p1[1]) : (pixel_y += 1) {
+                defer {
+                    factor0 += factor_step_0;
+                    factor1 += factor_step_1;
+
+                    z_factor0 += z_factor_step0;
+                    z_factor1 += z_factor_step1;
+                }
+
                 var span_interpolators0: Interpolators = undefined;
                 var span_interpolators1: Interpolators = undefined;
 
@@ -315,29 +584,45 @@ fn pipelineDrawTriangle(
                         @field(right.interpolators0, field.name) + @field(right_interpolator_diffs, field.name) * vector_factor1;
                 }
 
+                if (pixel_y < 0 or pixel_y >= render_pass.color_image.height) {
+                    continue;
+                }
+
                 drawSpan(
                     render_pass,
                     _uniform,
                     @This().init(
                         left.p0[0] + @as(isize, @intFromFloat(@ceil(@as(f32, @floatFromInt(left_x_diff)) * factor0))),
                         right.p0[0] + @as(isize, @intFromFloat(@ceil(@as(f32, @floatFromInt(right_x_diff)) * factor1))),
-                        0,
-                        0,
+                        left.z0 + left_z_diff * z_factor0,
+                        right.z0 + right_z_diff * z_factor1,
                         span_interpolators0,
                         span_interpolators1,
                     ),
-                    @intCast(y),
+                    triangle,
+                    triangle_attributes,
+                    twice_triangle_area,
+                    pixel_y,
                 );
-
-                factor0 += factor_step_0;
-                factor1 += factor_step_1;
             }
         }
 
-        fn drawSpan(render_pass: Pass, _uniform: anytype, span: @This(), y: usize) void {
+        fn drawSpan(
+            render_pass: Pass,
+            _uniform: anytype,
+            span: @This(),
+            triangle: [3]@Vector(3, f32),
+            triangle_attributes: [3]pipeline.FragmentInput,
+            twice_triangle_area: f32,
+            pixel_y: isize,
+        ) void {
+            _ = twice_triangle_area;
+
             const xdiff = span.x1 - span.x0;
 
             if (xdiff == 0) return;
+
+            const zdiff = span.z1 - span.z0;
 
             var interpolator_diffs: Interpolators = undefined;
 
@@ -346,55 +631,80 @@ fn pipelineDrawTriangle(
                     @field(span.interpolators1, field.name) - @field(span.interpolators0, field.name);
             }
 
-            var factor: f32 = 0;
             const factor_step = 1 / @as(f32, @floatFromInt(xdiff));
+            const factor_step1 = 1 / zdiff;
 
-            var x: isize = span.x0;
+            var factor: f32 = 0;
+            var factor1: f32 = 0;
 
-            while (x < span.x1) : (x += 1) {
-                defer factor += factor_step;
+            var pixel_x: isize = span.x0;
 
-                if (x < 0 or
-                    y < 0 or
-                    x >= render_pass.color_image.width or
-                    y >= render_pass.color_image.height)
+            while (pixel_x < span.x1) : (pixel_x += 1) {
+                defer {
+                    factor += factor_step;
+                    factor1 += factor_step1;
+                }
+
+                //not needed if clipping is perfect
+                //x, y can be usize if clipping is perfect too
+                if (pixel_x < 0 or
+                    pixel_x >= render_pass.color_image.width)
                 {
                     continue;
                 }
 
-                //point in clip space
                 const point = @Vector(3, f32){
-                    @as(f32, @floatFromInt(x)) / @as(f32, @floatFromInt(render_pass.color_image.width)),
-                    @as(f32, @floatFromInt(y)) / @as(f32, @floatFromInt(render_pass.color_image.height)),
-                    0,
+                    ((@as(f32, @floatFromInt(pixel_x)) / @as(f32, @floatFromInt(render_pass.color_image.width))) * 2) - 1,
+                    ((@as(f32, @floatFromInt(pixel_y)) / @as(f32, @floatFromInt(render_pass.color_image.height))) * 2) - 1,
+                    span.z0 + zdiff * factor1,
                 };
 
-                const fragment_index = @as(usize, @intCast(x)) + @as(usize, @intCast(y)) * render_pass.color_image.width;
+                const barycentrics = calculateBarycentrics(triangle, point);
+                _ = barycentrics;
+
+                const fragment_index = @as(usize, @intCast(pixel_x)) + @as(usize, @intCast(pixel_y)) * render_pass.color_image.width;
 
                 const depth = &render_pass.depth_buffer[fragment_index];
 
-                if (depth.* <= point[2]) {
-                    continue;
+                if (point[2] < depth.*) {
+                    // continue;
                 }
 
                 depth.* = point[2];
-
-                const pixel = &render_pass.color_image.pixels[fragment_index];
 
                 var fragment_input: pipeline.FragmentInput = undefined;
 
                 inline for (std.meta.fields(Interpolators)) |field| {
                     const factor_vector = @as(field.type, @splat(factor));
+                    const vector_dimensions = @typeInfo(field.type).Vector.len;
 
                     @field(fragment_input, field.name) =
                         @field(span.interpolators0, field.name) + (@field(interpolator_diffs, field.name) * factor_vector);
+
+                    inline for (0..vector_dimensions) |dimension| {
+                        const Component = std.meta.Child(field.type);
+
+                        const interpolator_lane: @Vector(3, Component) = .{
+                            @field(triangle_attributes[0], field.name)[dimension],
+                            @field(triangle_attributes[1], field.name)[dimension],
+                            @field(triangle_attributes[2], field.name)[dimension],
+                        };
+                        _ = interpolator_lane;
+
+                        // @field(fragment_input, field.name)[dimension] = vectorDotGeneric3D(3, Component, interpolator_lane, barycentrics);
+
+                        // @field(fragment_input, field.name)[dimension] =
+                        //     @field(triangle_attributes[0], field.name)[dimension] +
+                        //     @field(triangle_attributes[1], field.name)[dimension] +
+                        //     @field(triangle_attributes[2], field.name)[dimension];
+                    }
                 }
 
                 @call(.always_inline, pipeline.fragmentShader, .{
                     _uniform,
                     fragment_input,
                     point,
-                    pixel,
+                    render_pass.color_image.texelFetch(.{ @intCast(pixel_x), @intCast(pixel_y) }),
                 });
             }
         }
@@ -406,6 +716,12 @@ fn pipelineDrawTriangle(
         0,
     };
 
+    //twice the area of the triangle
+    const signed_edge0 = points[1] - points[0];
+    const signed_edge1 = points[2] - points[1];
+
+    const double_area = vectorLength(vectorCross3D(signed_edge0, signed_edge1));
+
     const p0_orig = (points[0] + @Vector(3, f32){ 1, 1, 1 }) / @Vector(3, f32){ 2, 2, 2 } * view_scale;
     const p1_orig = (points[1] + @Vector(3, f32){ 1, 1, 1 }) / @Vector(3, f32){ 2, 2, 2 } * view_scale;
     const p2_orig = (points[2] + @Vector(3, f32){ 1, 1, 1 }) / @Vector(3, f32){ 2, 2, 2 } * view_scale;
@@ -415,18 +731,18 @@ fn pipelineDrawTriangle(
     const p2 = @Vector(3, isize){ @intFromFloat(p2_orig[0]), @intFromFloat(p2_orig[1]), @intFromFloat(p2_orig[2]) };
 
     const edges: [3]Edge = .{
-        Edge.init(p0, p1, fragment_input_0[1], fragment_input_1[1]),
-        Edge.init(p1, p2, fragment_input_1[1], fragment_input_2[1]),
-        Edge.init(p2, p0, fragment_input_2[1], fragment_input_0[1]),
+        Edge.init(p0, p1, points[0][2], points[1][2], fragment_inputs[0], fragment_inputs[1]),
+        Edge.init(p1, p2, points[1][2], points[2][2], fragment_inputs[1], fragment_inputs[2]),
+        Edge.init(p2, p0, points[2][2], points[0][2], fragment_inputs[2], fragment_inputs[0]),
     };
 
-    var max_length: usize = 0;
+    var max_length: isize = 0;
     var long_edge_index: usize = 0;
 
     for (edges, 0..) |edge, i| {
         const length = edge.p1[1] - edge.p0[1];
         if (length > max_length) {
-            max_length = std.math.absCast(length);
+            max_length = std.math.absInt(length) catch unreachable;
             long_edge_index = i;
         }
     }
@@ -434,8 +750,24 @@ fn pipelineDrawTriangle(
     const short_edge_1: usize = (long_edge_index + 1) % 3;
     const short_edge_2: usize = (long_edge_index + 2) % 3;
 
-    Span.drawEdges(pass, uniform, edges[long_edge_index], edges[short_edge_1]);
-    Span.drawEdges(pass, uniform, edges[long_edge_index], edges[short_edge_2]);
+    Span.drawEdges(
+        pass,
+        uniform,
+        points,
+        fragment_inputs,
+        double_area,
+        edges[long_edge_index],
+        edges[short_edge_1],
+    );
+    Span.drawEdges(
+        pass,
+        uniform,
+        points,
+        fragment_inputs,
+        double_area,
+        edges[long_edge_index],
+        edges[short_edge_2],
+    );
 }
 
 pub fn pipelineDrawLine(
@@ -549,7 +881,14 @@ pub fn pipelineDrawLine(
 
             pass.depth_buffer[depth_index] = interpolated_point[2];
 
-            @call(.always_inline, pipeline.fragmentShader, .{ uniform, fragment_input, interpolated_point, &pass.color_image.pixels[index] });
+            const pixel = pass.color_image.texelFetch(.{ @intFromFloat(x), @intFromFloat(y) });
+
+            @call(.always_inline, pipeline.fragmentShader, .{
+                uniform,
+                fragment_input,
+                interpolated_point,
+                pixel,
+            });
         }
     }
 }
@@ -570,7 +909,29 @@ fn twoTriangleArea(triangle: [3]@Vector(2, f32)) f32 {
     const p1 = triangle[1] - triangle[0];
     const p2 = triangle[2] - triangle[0];
 
-    return p1[0] * p2[1] - p2[0] * p1[1];
+    return vectorCross2D(p1, p2);
+}
+
+fn twoTriangleArea3D(triangle: [3]@Vector(3, f32)) f32 {
+    const p1 = triangle[1] - triangle[0];
+    const p2 = triangle[2] - triangle[0];
+
+    return vectorLength(vectorCross3D(p1, p2));
+}
+
+fn vectorCross2D(a: @Vector(2, f32), b: @Vector(2, f32)) f32 {
+    return a[0] * b[1] - b[0] * a[1];
+}
+
+fn vectorCross3D(a: @Vector(3, f32), b: @Vector(3, f32)) @Vector(3, f32) {
+    const result_x = (a[1] * b[2]) - (a[2] * b[1]);
+    const result_y = (a[2] * b[0]) - (a[0] * b[2]);
+    const result_z = (a[0] * b[1]) - (a[1] * b[0]);
+    return .{ result_x, result_y, result_z };
+}
+
+fn vectorLength(a: @Vector(3, f32)) f32 {
+    return @sqrt(vectorDot(a, a));
 }
 
 pub fn drawTriangle(
@@ -767,30 +1128,14 @@ pub fn drawTriangle(
     Span.drawScanLines(pass, edges[long_edge_index], edges[short_edge_2]);
 }
 
-pub fn drawCircle(self: Renderer, pass: Pass, position: [2]f32, radius: f32) void {
-    _ = self;
-    _ = radius;
-
-    const target_position = [_]usize{
-        @as(usize, @intFromFloat(((position[0] + 1) / 2) * pass.color_image.width)),
-        @as(usize, @intFromFloat(((position[1] + 1) / 2) * pass.color_image.height)),
-    };
-
-    if (target_position[0] >= pass.color_image.width or target_position[1] >= pass.color_image.height) {
-        return;
-    }
-
-    var y: usize = 0;
-
-    while (y < pass.color_image.height) : (y += 1) {
-        var x: usize = 0;
-
-        while (x < pass.color_image.width) : (x += 1) {}
-    }
-}
-
 pub fn presentImage(self: Renderer, image: Image) void {
-    _ = c.SDL_UpdateTexture(self.sdl_texture, null, image.pixels.ptr, @as(c_int, @intCast(image.width * @sizeOf(Image.Color))));
+    for (0..image.height) |y| {
+        for (0..image.width) |x| {
+            self.swapchain_image[x + y * image.width] = image.texelFetch(.{ x, y }).*;
+        }
+    }
+
+    _ = c.SDL_UpdateTexture(self.sdl_texture, null, self.swapchain_image.ptr, @as(c_int, @intCast(image.width * @sizeOf(Image.Color))));
     _ = c.SDL_RenderCopy(self.sdl_renderer, self.sdl_texture, null, null);
     _ = c.SDL_RenderPresent(self.sdl_renderer);
 }

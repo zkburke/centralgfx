@@ -53,7 +53,11 @@ fn testVertexShader(
         .uv = vertex.uv,
     };
 
-    return .{ vertex.position, output };
+    return .{ .{
+        vertex.position[0] / @fabs(1.0 + vertex.position[2]),
+        vertex.position[1] / @fabs(1.0 + vertex.position[2]),
+        vertex.position[2],
+    }, output };
 }
 
 fn testFragmentShader(
@@ -62,14 +66,15 @@ fn testFragmentShader(
     position: @Vector(3, f32),
     pixel: *Image.Color,
 ) void {
+    _ = uniform;
     _ = position;
 
     var color: @Vector(4, f32) = .{ 1, 1, 1, 1 };
 
     color *= input.color;
 
-    if (uniform.texture) |texture|
-        color *= texture.affineSample(input.uv).toNormalized();
+    // if (uniform.texture) |texture|
+    // color *= texture.affineSample(input.uv).toNormalized();
 
     pixel.* = Image.Color.fromNormalized(color);
 }
@@ -95,48 +100,36 @@ pub fn main() !void {
     const window_width = 640;
     const window_height = 480;
 
-    const surface_width = 640 / 2;
-    const surface_height = 480 / 2;
+    const surface_width = 640 / 8;
+    const surface_height = 480 / 8;
 
     var renderer: Renderer = undefined;
 
-    try renderer.init(window_width, window_height, surface_width, surface_height, "CentralGfx");
-    defer renderer.deinit();
+    try renderer.init(allocator, window_width, window_height, surface_width, surface_height, "CentralGfx");
+    defer renderer.deinit(allocator);
 
-    const render_target = Image{
-        .pixels = try allocator.alloc(Image.Color, surface_width * surface_height),
-        .width = surface_width,
-        .height = surface_height,
-    };
+    var render_target = try Image.init(allocator, surface_width, surface_height);
+    defer render_target.deinit(allocator);
 
-    defer allocator.free(render_target.pixels);
-
-    const depth_target = try allocator.alloc(f32, render_target.pixels.len);
+    const depth_target = try allocator.alloc(f32, surface_width * surface_height);
     defer allocator.free(depth_target);
-
-    var test_image = Image{
-        .pixels = try allocator.alloc(Image.Color, 100 * 100),
-        .width = 100,
-        .height = 100,
-    };
-
-    defer allocator.free(test_image.pixels);
-
-    @memset(test_image.pixels, .{ .r = 255, .a = 128 });
 
     var cog_image_loaded = try zigimg.Image.fromMemory(allocator, cog_png);
     defer cog_image_loaded.deinit();
 
     const cog_image_data = cog_image_loaded.rawBytes();
 
-    const cog_image = Image{
-        .pixels = @as([*]Image.Color, @constCast(@ptrCast(cog_image_data)))[0..@as(usize, @intCast(cog_image_loaded.width * cog_image_loaded.height))],
-        .width = @as(usize, @intCast(cog_image_loaded.width)),
-        .height = @as(usize, @intCast(cog_image_loaded.height)),
-    };
+    var cog_image = try Image.initFromLinear(
+        allocator,
+        @as([*]Image.Color, @constCast(@ptrCast(cog_image_data)))[0..@as(usize, @intCast(cog_image_loaded.width * cog_image_loaded.height))],
+        cog_image_loaded.width,
+        cog_image_loaded.height,
+    );
+    defer cog_image.deinit(allocator);
 
     const enable_raster_pass = true;
     var enable_ray_pass = false;
+    _ = enable_ray_pass;
 
     // var default_prng = std.rand.DefaultPrng.init(@intCast(u64, std.time.timestamp()));
 
@@ -147,9 +140,12 @@ pub fn main() !void {
 
     // const thread_pixel_count = render_target.pixels.len / core_count;
     const thread_pixel_height = render_target.height / core_count;
+    _ = thread_pixel_height;
 
     var thread_slice_index: usize = 0;
+    _ = thread_slice_index;
     var pixel_offset: @Vector(2, usize) = .{ 0, 0 };
+    _ = pixel_offset;
 
     const spheres = [_]RayTracer.Sphere{
         .{
@@ -205,13 +201,14 @@ pub fn main() !void {
         .planes = &planes,
         .lights = &lights,
     };
+    _ = scene;
 
     while (!renderer.shouldWindowClose()) {
         const frame_start_time = std.time.microTimestamp();
         const time_s: f32 = @as(f32, @floatFromInt(c.SDL_GetTicks())) / 1000;
 
         if (true) {
-            @memset(render_target.pixels, Image.Color.fromNormalized(.{ 0.25, 0.25, 0.25, 1 }));
+            @memset(render_target.texel_buffer, Image.Color.fromNormalized(.{ 0.25, 0.25, 1, 1 }));
             @memset(depth_target, 1);
 
             const render_pass = Renderer.Pass{
@@ -236,8 +233,6 @@ pub fn main() !void {
                 for (&tris) |*tri| for (tri[0..3]) |*vertex| {
                     vertex[0] += @sin(time_s);
                 };
-
-                // renderer.drawLinedTriangles(render_pass, &tris);
 
                 for (tris) |tri| {
                     renderer.drawTriangle(
@@ -283,12 +278,12 @@ pub fn main() !void {
 
                 var triangle_vertices = [_]TestVertex{
                     .{
-                        .position = .{ -0.5, 0.5, 0 },
+                        .position = .{ -0.5, 0.5, 1 },
                         .color = .{ 1, 0, 0, 1 },
                         .uv = .{ 0, 0 },
                     },
                     .{
-                        .position = .{ 0.5, 0.5, 0 },
+                        .position = .{ 0.5, 0.5, 0.5 },
                         .color = .{ 0, 1, 0, 1 },
                         .uv = .{ 1, 0 },
                     },
@@ -299,7 +294,8 @@ pub fn main() !void {
                     },
                 };
 
-                triangle_vertices[0].position[1] += @sin(time_s);
+                triangle_vertices[1].position[0] += @sin(time_s);
+                triangle_vertices[1].position[2] += @sin(time_s);
 
                 for (&triangle) |*vertex| {
                     vertex.* = (vertex.* + @as(@Vector(3, f32), @splat(@as(f32, 1)))) / @as(@Vector(3, f32), @splat(@as(f32, 2)));
@@ -318,34 +314,34 @@ pub fn main() !void {
                 );
             }
 
-            if (enable_ray_pass) {
-                const render_start = std.time.milliTimestamp();
+            // if (enable_ray_pass) {
+            //     const render_start = std.time.milliTimestamp();
 
-                // const thread_args = .{ render_target, pixel_offset, Vec(2, usize) { render_target.width, pixel_offset[1] + thread_pixel_height }};
+            //     // const thread_args = .{ render_target, pixel_offset, Vec(2, usize) { render_target.width, pixel_offset[1] + thread_pixel_height }};
 
-                // const thread = try std.Thread.spawn(.{}, RayTracer.traceRays, thread_args);
-                // defer thread.join();
+            //     // const thread = try std.Thread.spawn(.{}, RayTracer.traceRays, thread_args);
+            //     // defer thread.join();
 
-                // spheres[0].position[0] = @sin(time);
+            //     // spheres[0].position[0] = @sin(time);
 
-                RayTracer.traceRays(scene, render_target, pixel_offset, .{ render_target.width, pixel_offset[1] + thread_pixel_height });
-                pixel_offset += @Vector(2, usize){ 0, thread_pixel_height };
+            //     RayTracer.traceRays(scene, render_target, pixel_offset, .{ render_target.width, pixel_offset[1] + thread_pixel_height });
+            //     pixel_offset += @Vector(2, usize){ 0, thread_pixel_height };
 
-                std.log.err("Rendered slice {} ({}-{}): time = {}ms", .{ thread_slice_index, pixel_offset[1], thread_pixel_height, std.time.milliTimestamp() - render_start });
+            //     std.log.err("Rendered slice {} ({}-{}): time = {}ms", .{ thread_slice_index, pixel_offset[1], thread_pixel_height, std.time.milliTimestamp() - render_start });
 
-                thread_slice_index += 1;
+            //     thread_slice_index += 1;
 
-                if (thread_slice_index == ray_threads.len) {
-                    thread_slice_index = 0;
-                    pixel_offset = .{ 0, 0 };
-                    enable_ray_pass = false;
-                }
+            //     if (thread_slice_index == ray_threads.len) {
+            //         thread_slice_index = 0;
+            //         pixel_offset = .{ 0, 0 };
+            //         enable_ray_pass = false;
+            //     }
 
-                // for (ray_threads) |thread|
-                // {
-                //     _ = thread;
-                // }
-            }
+            //     // for (ray_threads) |thread|
+            //     // {
+            //     //     _ = thread;
+            //     // }
+            // }
         }
 
         const frame_end_time = std.time.microTimestamp();

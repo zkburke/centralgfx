@@ -302,7 +302,7 @@ pub fn traceRays(scene: Scene, target: Image, offset: @Vector(2, usize), size: @
     const vertical = @Vector(3, f32){ 0, viewport_height, 0 };
     const lower_left_corner = ray_begin - horizontal / @as(@Vector(3, f32), @splat(2)) - vertical / @as(@Vector(3, f32), @splat(2)) - @Vector(3, f32){ 0, 0, focal_length };
 
-    var pixel = target.pixels.ptr[offset[0] + target.width * offset[1] .. target.pixels.len - 1].ptr;
+    var pixel = target.texel_buffer.ptr[offset[0] + target.width * offset[1] .. target.texel_buffer.len - 1].ptr;
 
     for (offset[1]..size[1]) |y| {
         for (offset[0]..size[0]) |x| {
