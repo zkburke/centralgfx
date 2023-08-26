@@ -127,12 +127,18 @@ pub const PrimitiveType = enum {
     point,
 };
 
+pub const PolygonFillMode = enum {
+    fill,
+    line,
+};
+
 pub fn Pipeline(
     comptime UniformInputType: type,
     comptime FragmentInputType: type,
     comptime clusterShaderFn: anytype,
     comptime vertexShaderFn: anytype,
     comptime fragmentShaderFn: anytype,
+    comptime _polygon_fill_mode: PolygonFillMode,
 ) type {
     _ = clusterShaderFn;
     const VertexShaderFn = fn (uniform: UniformInputType, vertex_index: usize) struct { @Vector(4, f32), FragmentInputType };
@@ -144,6 +150,8 @@ pub fn Pipeline(
 
         pub const vertexShader: VertexShaderFn = vertexShaderFn;
         pub const fragmentShader: FragmentShaderFn = fragmentShaderFn;
+
+        pub const polygon_fill_mode: PolygonFillMode = _polygon_fill_mode;
     };
 }
 
@@ -182,6 +190,7 @@ pub fn pipelineDrawTriangles(
     triangle_count: usize,
     comptime pipeline: anytype,
 ) void {
+    @setRuntimeSafety(false);
     for (0..triangle_count) |index| {
         self.pipelineDrawTriangle(pass, uniform, index, pipeline);
     }
@@ -365,15 +374,50 @@ fn clipTriangleNew(
     _ = triangle;
 }
 
+inline fn calculateBarycentrics2DOptimized(
+    triangle: [3]@Vector(2, f32),
+    triangle_area_inverse: f32,
+    point: @Vector(2, f32),
+) @Vector(3, f32) {
+    @setRuntimeSafety(false);
+
+    const pb = triangle[1] - point;
+    const cp = triangle[2] - point;
+    const pa = triangle[0] - point;
+
+    const one_over_area = triangle_area_inverse;
+
+    const areas = @fabs(@Vector(3, f32){
+        pb[0] * cp[1],
+        cp[0] * pa[1],
+        0,
+    } - @Vector(3, f32){
+        cp[0] * pb[1],
+        pa[0] * cp[1],
+        0,
+    });
+
+    var bary = areas * @as(@Vector(3, f32), @splat(one_over_area));
+
+    bary[2] = 1 - bary[0] - bary[1];
+
+    bary = @max(bary, @Vector(3, f32){ 0, 0, 0 });
+    bary = @min(bary, @Vector(3, f32){ 1, 1, 1 });
+
+    return bary;
+}
+
 fn calculateBarycentrics2D(triangle: [3]@Vector(2, f32), point: @Vector(2, f32)) @Vector(3, f32) {
     const area_abc = @fabs(vectorCross2D(triangle[1] - triangle[0], triangle[2] - triangle[0]));
 
     const area_pbc = @fabs(vectorCross2D(triangle[1] - point, triangle[2] - point));
     const area_pca = @fabs(vectorCross2D(triangle[2] - point, triangle[0] - point));
 
+    const one_over_area = 1 / area_abc;
+
     var bary: @Vector(3, f32) = .{
-        area_pbc / area_abc,
-        area_pca / area_abc,
+        area_pbc * one_over_area,
+        area_pca * one_over_area,
         0,
     };
 
@@ -394,6 +438,8 @@ fn pipelineDrawTriangle(
     triangle_index: usize,
     comptime pipeline: anytype,
 ) void {
+    @setRuntimeSafety(false);
+
     const fragment_input_0 = pipeline.vertexShader(uniform, triangle_index * 3 + 0);
     const fragment_input_1 = pipeline.vertexShader(uniform, triangle_index * 3 + 1);
     const fragment_input_2 = pipeline.vertexShader(uniform, triangle_index * 3 + 2);
@@ -405,10 +451,24 @@ fn pipelineDrawTriangle(
         point[1] = 1 - point[1];
     }
 
+    const clip_volume_min = @Vector(4, f32){ -1, -1, 0, 0 };
+    const clip_volume_max = @Vector(4, f32){ 1, 1, 1, 1 };
+
     for (&triangle) |*point| {
         point[0] /= point[3];
         point[1] /= point[3];
         point[2] /= point[3];
+    }
+
+    // Pre clip cull
+    if ((@reduce(.And, triangle[0] > clip_volume_max) and
+        @reduce(.And, triangle[1] > clip_volume_max) and
+        @reduce(.And, triangle[2] > clip_volume_max)) or
+        (@reduce(.And, triangle[0] < clip_volume_min) and
+        @reduce(.And, triangle[1] < clip_volume_min) and
+        @reduce(.And, triangle[2] < clip_volume_min)))
+    {
+        return;
     }
 
     const two_triangle_area = twoTriangleArea(.{
@@ -417,8 +477,8 @@ fn pipelineDrawTriangle(
         .{ triangle[2][0], triangle[2][1] },
     });
 
-    //backface cull
-    if (true and two_triangle_area > 0) {
+    //backface and contribution cull
+    if (two_triangle_area >= 0) {
         return;
     }
 
@@ -426,7 +486,11 @@ fn pipelineDrawTriangle(
         pipeline,
         pass,
         uniform,
-        triangle,
+        .{
+            .{ std.math.clamp(triangle[0][0], -1, 1), std.math.clamp(triangle[0][1], -1, 1), std.math.clamp(triangle[0][2], 0, 1), triangle[0][3] },
+            .{ std.math.clamp(triangle[1][0], -1, 1), std.math.clamp(triangle[1][1], -1, 1), std.math.clamp(triangle[1][2], 0, 1), triangle[1][3] },
+            .{ std.math.clamp(triangle[2][0], -1, 1), std.math.clamp(triangle[2][1], -1, 1), std.math.clamp(triangle[2][2], 0, 1), triangle[2][3] },
+        },
         .{ fragment_input_0[1], fragment_input_1[1], fragment_input_2[1] },
     );
 
@@ -528,8 +592,6 @@ fn pipelineRasteriseTriangle(
     const Edge = struct {
         p0: @Vector(3, isize),
         p1: @Vector(3, isize),
-        z0: f32,
-        z1: f32,
 
         interpolators0: Interpolators,
         interpolators1: Interpolators,
@@ -537,8 +599,6 @@ fn pipelineRasteriseTriangle(
         pub fn init(
             p0: @Vector(3, isize),
             p1: @Vector(3, isize),
-            z0: f32,
-            z1: f32,
             interpolators0: Interpolators,
             interpolators1: Interpolators,
         ) @This() {
@@ -546,8 +606,6 @@ fn pipelineRasteriseTriangle(
                 return .{
                     .p0 = p0,
                     .p1 = p1,
-                    .z0 = z0,
-                    .z1 = z1,
                     .interpolators0 = interpolators0,
                     .interpolators1 = interpolators1,
                 };
@@ -555,8 +613,6 @@ fn pipelineRasteriseTriangle(
                 return .{
                     .p0 = p1,
                     .p1 = p0,
-                    .z0 = z1,
-                    .z1 = z0,
                     .interpolators0 = interpolators1,
                     .interpolators1 = interpolators0,
                 };
@@ -567,8 +623,6 @@ fn pipelineRasteriseTriangle(
     const Span = struct {
         x0: isize,
         x1: isize,
-        z0: f32,
-        z1: f32,
 
         interpolators0: Interpolators,
         interpolators1: Interpolators,
@@ -576,8 +630,6 @@ fn pipelineRasteriseTriangle(
         pub fn init(
             x0: isize,
             x1: isize,
-            z0: f32,
-            z1: f32,
             interpolators0: Interpolators,
             interpolators1: Interpolators,
         ) @This() {
@@ -585,8 +637,6 @@ fn pipelineRasteriseTriangle(
                 return .{
                     .x0 = x0,
                     .x1 = x1,
-                    .z0 = z0,
-                    .z1 = z1,
                     .interpolators0 = interpolators0,
                     .interpolators1 = interpolators1,
                 };
@@ -594,8 +644,6 @@ fn pipelineRasteriseTriangle(
                 return .{
                     .x0 = x1,
                     .x1 = x0,
-                    .z0 = z1,
-                    .z1 = z0,
                     .interpolators0 = interpolators1,
                     .interpolators1 = interpolators0,
                 };
@@ -607,36 +655,29 @@ fn pipelineRasteriseTriangle(
             _uniform: anytype,
             triangle: [3]@Vector(4, f32),
             triangle_attributes: [3]pipeline.FragmentInput,
-            twice_triangle_area: f32,
+            screen_area: f32,
+            inverse_screen_area: f32,
             left: Edge,
             right: Edge,
         ) void {
+            @setRuntimeSafety(false);
+
+            const x_diff: u64 = std.math.absCast(right.p1[0] - right.p0[0]) + std.math.absCast(left.p1[0] - left.p0[0]);
+
+            if (x_diff == 0) return;
+
             const left_y_diff = left.p1[1] - left.p0[1];
 
             if (left_y_diff == 0) return;
+            // std.debug.assert(left_y_diff != 0);
 
             const right_y_diff = right.p1[1] - right.p0[1];
 
             if (right_y_diff == 0) return;
+            // std.debug.assert(right_y_diff != 0);
 
             const left_x_diff = left.p1[0] - left.p0[0];
             const right_x_diff = right.p1[0] - right.p0[0];
-
-            const left_z_diff = left.z1 - left.z0;
-            const right_z_diff = right.z1 - right.z0;
-
-            var left_interpolator_diffs: Interpolators = undefined;
-            var right_interpolator_diffs: Interpolators = undefined;
-
-            inline for (std.meta.fields(Interpolators)) |field| {
-                @field(left_interpolator_diffs, field.name) =
-                    @field(left.interpolators1, field.name) -
-                    @field(left.interpolators0, field.name);
-
-                @field(right_interpolator_diffs, field.name) =
-                    @field(right.interpolators1, field.name) -
-                    @field(right.interpolators0, field.name);
-            }
 
             var factor0: f32 = @as(f32, @floatFromInt(right.p0[1] - left.p0[1])) / @as(f32, @floatFromInt(left_y_diff));
             var factor1: f32 = 0;
@@ -644,39 +685,37 @@ fn pipelineRasteriseTriangle(
             const factor_step_0 = 1 / @as(f32, @floatFromInt(left_y_diff));
             const factor_step_1 = 1 / @as(f32, @floatFromInt(right_y_diff));
 
-            var z_factor0: f32 = (right.z0 - left.z0) / left_z_diff;
-            var z_factor1: f32 = 0;
+            if (false) {
+                const tile_x: usize = @intCast(std.math.clamp(
+                    @as(isize, @intCast(@divFloor(left.p0[0], 4))),
+                    0,
+                    @as(isize, @intCast(render_pass.color_image.width / 4)),
+                ));
+                const tile_y: usize = @intCast(std.math.clamp(
+                    @as(isize, @intCast(@divFloor(left.p0[1], 4))),
+                    0,
+                    @as(isize, @intCast(render_pass.color_image.height / 4)),
+                ));
 
-            const z_factor_step0 = 1 / left_z_diff;
-            const z_factor_step1 = 1 / right_z_diff;
+                const tile_count_x: usize = @intCast(std.math.divCeil(usize, render_pass.color_image.width, 4) catch unreachable);
+                const tile_count_y: usize = @intCast(std.math.divCeil(isize, right_y_diff, 4) catch unreachable);
 
-            var pixel_y: isize = right.p0[1];
+                for (tile_y..tile_y + tile_count_y) |tile_y_rel| {
+                    const tile_begin_x = tile_x;
+                    const tile_begin_y = tile_y_rel;
 
-            while (pixel_y < right.p1[1]) : (pixel_y += 1) {
+                    const tile_pointer = render_pass.color_image.texel_buffer.ptr + ((tile_begin_x + tile_begin_y * tile_count_x) * (4 * 4));
+
+                    @prefetch(tile_pointer, std.builtin.PrefetchOptions{ .rw = .write, .locality = 3 });
+                }
+            }
+
+            var pixel_y: isize = @max(right.p0[1], 0);
+
+            while (pixel_y < @min(right.p1[1], @as(isize, @intCast(render_pass.color_image.height)))) : (pixel_y += 1) {
                 defer {
                     factor0 += factor_step_0;
                     factor1 += factor_step_1;
-
-                    z_factor0 += z_factor_step0;
-                    z_factor1 += z_factor_step1;
-                }
-
-                var span_interpolators0: Interpolators = undefined;
-                var span_interpolators1: Interpolators = undefined;
-
-                inline for (std.meta.fields(Interpolators)) |field| {
-                    const vector_factor0 = @as(field.type, @splat(factor0));
-                    const vector_factor1 = @as(field.type, @splat(factor1));
-
-                    @field(span_interpolators0, field.name) =
-                        @field(left.interpolators0, field.name) + @field(left_interpolator_diffs, field.name) * vector_factor0;
-
-                    @field(span_interpolators1, field.name) =
-                        @field(right.interpolators0, field.name) + @field(right_interpolator_diffs, field.name) * vector_factor1;
-                }
-
-                if (pixel_y < 0 or pixel_y >= render_pass.color_image.height) {
-                    continue;
                 }
 
                 drawSpan(
@@ -685,14 +724,13 @@ fn pipelineRasteriseTriangle(
                     @This().init(
                         left.p0[0] + @as(isize, @intFromFloat(@ceil(@as(f32, @floatFromInt(left_x_diff)) * factor0))),
                         right.p0[0] + @as(isize, @intFromFloat(@ceil(@as(f32, @floatFromInt(right_x_diff)) * factor1))),
-                        left.z0 + left_z_diff * z_factor0,
-                        right.z0 + right_z_diff * z_factor1,
-                        span_interpolators0,
-                        span_interpolators1,
+                        undefined,
+                        undefined,
                     ),
                     triangle,
                     triangle_attributes,
-                    twice_triangle_area,
+                    screen_area,
+                    inverse_screen_area,
                     pixel_y,
                 );
             }
@@ -704,72 +742,56 @@ fn pipelineRasteriseTriangle(
             span: @This(),
             triangle: [3]@Vector(4, f32),
             triangle_attributes: [3]pipeline.FragmentInput,
-            twice_triangle_area: f32,
+            screen_area: f32,
+            inverse_screen_area: f32,
             pixel_y: isize,
         ) void {
-            _ = twice_triangle_area;
+            @setRuntimeSafety(false);
 
+            _ = screen_area;
             const xdiff = span.x1 - span.x0;
 
-            if (xdiff == 0) return;
-
-            const zdiff = span.z1 - span.z0;
-
-            var interpolator_diffs: Interpolators = undefined;
-
-            inline for (std.meta.fields(Interpolators)) |field| {
-                @field(interpolator_diffs, field.name) =
-                    @field(span.interpolators1, field.name) - @field(span.interpolators0, field.name);
-            }
-
             const factor_step = 1 / @as(f32, @floatFromInt(xdiff));
-            const factor_step1 = 1 / zdiff;
 
             var factor: f32 = 0;
-            var factor1: f32 = 0;
 
-            var pixel_x: isize = span.x0;
+            var pixel_x: isize = @max(span.x0, 0);
 
             while (pixel_x < span.x1) : (pixel_x += 1) {
                 defer {
                     factor += factor_step;
-                    factor1 += factor_step1;
                 }
 
-                //Wireframe
-                if (false and pixel_x != span.x0 and pixel_x != span.x1 - 1) {
-                    continue;
-                }
-
-                //not needed if clipping is perfect
-                //x, y can be usize if clipping is perfect too
-                if (pixel_x < 0 or
-                    pixel_x >= render_pass.color_image.width)
-                {
-                    continue;
-                }
+                defer switch (pipeline.polygon_fill_mode) {
+                    .line => {
+                        if (pixel_x == span.x0) {
+                            pixel_x = span.x1 - 1;
+                        }
+                    },
+                    .fill => {},
+                };
 
                 var point = @Vector(3, f32){
                     ((@as(f32, @floatFromInt(pixel_x)) / @as(f32, @floatFromInt(render_pass.color_image.width))) * 2) - 1,
                     ((@as(f32, @floatFromInt(pixel_y)) / @as(f32, @floatFromInt(render_pass.color_image.height))) * 2) - 1,
-                    span.z0 + zdiff * factor1,
+                    0,
                 };
 
-                var barycentrics = calculateBarycentrics2D(.{
-                    .{ triangle[0][0], triangle[0][1] },
-                    .{ triangle[1][0], triangle[1][1] },
-                    .{ triangle[2][0], triangle[2][1] },
-                }, .{ point[0], point[1] });
+                var barycentrics = calculateBarycentrics2DOptimized(
+                    .{
+                        .{ triangle[0][0], triangle[0][1] },
+                        .{ triangle[1][0], triangle[1][1] },
+                        .{ triangle[2][0], triangle[2][1] },
+                    },
+                    inverse_screen_area,
+                    .{ point[0], point[1] },
+                );
 
                 barycentrics[0] = barycentrics[0] / triangle[0][3];
                 barycentrics[1] = barycentrics[1] / triangle[1][3];
                 barycentrics[2] = barycentrics[2] / triangle[2][3];
 
                 barycentrics = barycentrics / @as(@Vector(3, f32), @splat(barycentrics[0] + barycentrics[1] + barycentrics[2]));
-
-                // std.debug.assert(barycentrics[0] < 1);
-                // std.debug.assert(barycentrics[1] < 1);
-                // std.debug.assert(barycentrics[2] < 1);
 
                 point[2] =
                     triangle[0][2] * barycentrics[0] +
@@ -789,12 +811,7 @@ fn pipelineRasteriseTriangle(
                 var fragment_input: pipeline.FragmentInput = undefined;
 
                 inline for (std.meta.fields(Interpolators)) |field| {
-                    const factor_vector = @as(field.type, @splat(factor));
-                    _ = factor_vector;
                     const vector_dimensions = @typeInfo(field.type).Vector.len;
-
-                    // @field(fragment_input, field.name) =
-                    //     @field(span.interpolators0, field.name) + (@field(interpolator_diffs, field.name) * factor_vector);
 
                     inline for (0..vector_dimensions) |dimension| {
                         const Component = std.meta.Child(field.type);
@@ -817,8 +834,6 @@ fn pipelineRasteriseTriangle(
                     point,
                     pixel,
                 });
-
-                // pixel.* = Image.Color.fromNormalized(.{ point[2] * 10, point[2] * 10, point[2] * 10, 1 });
             }
         }
     };
@@ -830,11 +845,14 @@ fn pipelineRasteriseTriangle(
         1,
     };
 
-    //twice the area of the triangle
-    const signed_edge0 = points[1] - points[0];
-    const signed_edge1 = points[2] - points[1];
+    const points_2d: [3]@Vector(2, f32) = .{
+        .{ points[0][0], points[0][1] },
+        .{ points[1][0], points[1][1] },
+        .{ points[2][0], points[2][1] },
+    };
 
-    const double_area = vectorLength(vectorCross3D(.{ signed_edge0[0], signed_edge0[1], signed_edge0[2] }, .{ signed_edge1[0], signed_edge1[1], signed_edge1[2] }));
+    const screen_area = @fabs(vectorCross2D(points_2d[1] - points_2d[0], points_2d[2] - points_2d[0]));
+    const inverse_screen_area = 1 / screen_area;
 
     const p0_orig = @ceil((points[0] + @Vector(4, f32){ 1, 1, 1, 1 }) / @Vector(4, f32){ 2, 2, 2, 2 } * view_scale);
     const p1_orig = @ceil((points[1] + @Vector(4, f32){ 1, 1, 1, 1 }) / @Vector(4, f32){ 2, 2, 2, 2 } * view_scale);
@@ -845,9 +863,9 @@ fn pipelineRasteriseTriangle(
     const p2: @Vector(3, isize) = .{ @intFromFloat(p2_orig[0]), @intFromFloat(p2_orig[1]), @intFromFloat(p2_orig[2]) };
 
     const edges: [3]Edge = .{
-        Edge.init(p0, p1, points[0][2], points[1][2], fragment_inputs[0], fragment_inputs[1]),
-        Edge.init(p1, p2, points[1][2], points[2][2], fragment_inputs[1], fragment_inputs[2]),
-        Edge.init(p2, p0, points[2][2], points[0][2], fragment_inputs[2], fragment_inputs[0]),
+        Edge.init(p0, p1, fragment_inputs[0], fragment_inputs[1]),
+        Edge.init(p1, p2, fragment_inputs[1], fragment_inputs[2]),
+        Edge.init(p2, p0, fragment_inputs[2], fragment_inputs[0]),
     };
 
     var max_length: isize = 0;
@@ -869,7 +887,8 @@ fn pipelineRasteriseTriangle(
         uniform,
         points,
         fragment_inputs,
-        double_area,
+        screen_area,
+        inverse_screen_area,
         edges[long_edge_index],
         edges[short_edge_1],
     );
@@ -878,7 +897,8 @@ fn pipelineRasteriseTriangle(
         uniform,
         points,
         fragment_inputs,
-        double_area,
+        screen_area,
+        inverse_screen_area,
         edges[long_edge_index],
         edges[short_edge_2],
     );

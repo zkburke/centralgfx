@@ -147,6 +147,8 @@ pub fn copy(destination: Image, source: Image) void {
 }
 
 pub fn texelFetch(self: Image, position: struct { x: usize, y: usize }) *Color {
+    @setRuntimeSafety(false);
+
     const tile_count_x = std.math.divCeil(usize, self.width, tile_width) catch unreachable;
 
     const tile_x = @divFloor(position.x, tile_width);
@@ -168,7 +170,7 @@ pub fn setPixel(self: Image, position: struct { x: usize, y: usize }, color: Col
     self.texelFetch(.{ position.x, position.y }).* = color;
 }
 
-pub fn affineSample(self: Image, uv: @Vector(2, f32)) Color {
+pub fn sample(self: Image, uv: @Vector(2, f32)) Color {
     @setRuntimeSafety(false);
 
     const scaled_uv = uv * @Vector(2, f32){ @as(f32, @floatFromInt(self.width)), @as(f32, @floatFromInt(self.height)) };

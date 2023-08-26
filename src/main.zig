@@ -21,6 +21,7 @@ const TestVertex = struct {
     position: @Vector(3, f32),
     color: @Vector(4, f32),
     uv: @Vector(2, f32),
+    normal: @Vector(3, f32) = .{ 0, 1, 0 },
 };
 
 const TestPipelineUniformInput = struct {
@@ -34,6 +35,8 @@ const TestPipelineUniformInput = struct {
 const TestPipelineFragmentInput = struct {
     color: @Vector(4, f32),
     uv: @Vector(2, f32),
+    normal: @Vector(3, f32),
+    position_world_space: @Vector(3, f32),
 };
 
 fn testClusterShader(
@@ -54,12 +57,16 @@ fn testVertexShader(
     const index = uniform.indices[vertex_index];
     const vertex = uniform.vertices[index];
 
+    const world_space_position = uniform.transform.mulByVec4(.{ .data = .{ vertex.position[0], vertex.position[1], vertex.position[2], 1 } });
+
     const output: TestPipelineFragmentInput = .{
         .color = vertex.color,
         .uv = vertex.uv,
+        .normal = vertex.normal,
+        .position_world_space = .{ world_space_position.data[0], world_space_position.data[1], world_space_position.data[2] },
     };
 
-    const position = uniform.view_projection.mul(uniform.transform).mulByVec4(.{ .data = .{ vertex.position[0], vertex.position[1], vertex.position[2], 1 } });
+    const position = uniform.view_projection.mulByVec4(world_space_position);
 
     return .{ position.data, output };
 }
@@ -71,15 +78,35 @@ fn testFragmentShader(
     pixel: *Image.Color,
 ) void {
     _ = position;
-
     var color: @Vector(4, f32) = .{ 1, 1, 1, 1 };
 
     color *= input.color;
 
     if (uniform.texture) |texture|
-        color *= texture.affineSample(input.uv).toNormalized();
+        color *= texture.sample(input.uv).toNormalized();
+
+    const light_pos = @Vector(3, f32){ 0, 2, 0 };
+    const light_dir = zalgebra.Vec3.norm(.{ .data = light_pos - input.position_world_space }).data;
+
+    const distance_to_light = zalgebra.Vec3.distance(.{ .data = light_pos }, .{input.position_world_space});
+
+    const attentuation = 10 / @max(distance_to_light * distance_to_light, 0.01 * 0.01);
+
+    const light_intensity = @max(zalgebra.Vec3.dot(.{ .data = input.normal }, .{ .data = light_dir }), 0);
+
+    color *= @splat(light_intensity * attentuation);
+
+    color[0] = std.math.clamp(color[0], 0, 1);
+    color[1] = std.math.clamp(color[1], 0, 1);
+    color[2] = std.math.clamp(color[2], 0, 1);
+    color[3] = std.math.clamp(color[3], 0, 1);
 
     pixel.* = Image.Color.fromNormalized(color);
+
+    const draw_depth_factor = 1;
+    _ = draw_depth_factor;
+
+    // pixel.* = Image.Color.fromNormalized(.{ position[2] * draw_depth_factor, position[2] * draw_depth_factor, position[2] * draw_depth_factor, 1 });
 }
 
 pub const TestPipeline = Renderer.Pipeline(
@@ -88,6 +115,7 @@ pub const TestPipeline = Renderer.Pipeline(
     testClusterShader,
     testVertexShader,
     testFragmentShader,
+    .fill,
 );
 
 pub const Mesh = struct {
@@ -244,6 +272,7 @@ pub fn loadMesh(allocator: std.mem.Allocator, file_path: []const u8) !Mesh {
                     const position_vector = @Vector(3, f32){ position_source_x, position_source_y, position_source_z };
                     const uv: @Vector(2, f32) = .{ texture_coordinates.items[uv_index], texture_coordinates.items[uv_index + 1] };
                     const color: @Vector(4, f32) = if (colors.items.len != 0) .{ colors.items[color_index], colors.items[color_index + 1], colors.items[color_index + 2], 1 } else @splat(1);
+                    const normal: @Vector(3, f32) = .{ normals.items[normal_index], normals.items[normal_index + 1], normals.items[normal_index + 2] };
                     _ = color;
 
                     const position_transformed = (zalgebra.Mat4{ .data = transform_matrix }).mulByVec4(.{ .data = .{
@@ -261,6 +290,7 @@ pub fn loadMesh(allocator: std.mem.Allocator, file_path: []const u8) !Mesh {
                         .position = .{ position_transformed.data[0], position_transformed.data[1], position_transformed.data[2] },
                         .uv = uv,
                         .color = .{ 1, 1, 1, 1 },
+                        .normal = normal,
                     });
                 }
             }
@@ -310,6 +340,14 @@ fn freeMesh(mesh: *Mesh, allocator: std.mem.Allocator) void {
     mesh.* = undefined;
 }
 
+fn getKeyDown(key: c.SDL_Scancode) bool {
+    var key_count: c_int = 0;
+
+    const keys = c.SDL_GetKeyboardState(&key_count)[0..@intCast(key_count)];
+
+    return keys[key] == 1;
+}
+
 pub fn main() !void {
     var general_allocator = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = general_allocator.deinit();
@@ -323,8 +361,8 @@ pub fn main() !void {
     const window_width = 640;
     const window_height = 480;
 
-    const surface_width = 640 / 4;
-    const surface_height = 480 / 4;
+    const surface_width = 640 / 1;
+    const surface_height = 480 / 1;
 
     var renderer: Renderer = undefined;
 
@@ -350,7 +388,7 @@ pub fn main() !void {
     );
     defer cog_image.deinit(allocator);
 
-    var mesh = try loadMesh(allocator, "src/res/light_test.gltf");
+    var mesh = try loadMesh(allocator, "src/res/suzanne/Suzanne.gltf");
     defer freeMesh(&mesh, allocator);
 
     const enable_raster_pass = true;
@@ -429,6 +467,24 @@ pub fn main() !void {
     };
     _ = scene;
 
+    var last_mouse_x: f32 = 0;
+    var last_mouse_y: f32 = 0;
+
+    var yaw: f32 = 0;
+    var pitch: f32 = 0;
+    var roll: f32 = 0;
+    _ = roll;
+
+    var camera_front: @Vector(3, f32) = .{ 0, 0, 0 };
+    var camera_target: @Vector(3, f32) = .{ 0, 0, 0 };
+    var camera_translation: @Vector(3, f32) = .{ 0, 0, -1 };
+
+    var frame_time: f32 = 0.016;
+
+    _ = c.SDL_CaptureMouse(c.SDL_TRUE);
+
+    _ = c.SDL_ShowCursor(0);
+
     while (!renderer.shouldWindowClose()) {
         const frame_start_time = std.time.microTimestamp();
         const time_s: f32 = @as(f32, @floatFromInt(c.SDL_GetTicks())) / 1000;
@@ -496,8 +552,9 @@ pub fn main() !void {
                     .transform = zalgebra.Mat4.identity(),
                     .view_projection = zalgebra.Mat4.identity(),
                 };
+                _ = uniforms;
 
-                renderer.pipelineDrawLine(render_pass, uniforms, line_vertices.len, TestPipeline);
+                // renderer.pipelineDrawLine(render_pass, uniforms, line_vertices.len, TestPipeline);
 
                 var triangle = [3]@Vector(3, f32){
                     .{ -0.5, 0.5, 0 },
@@ -523,15 +580,86 @@ pub fn main() !void {
                     },
                 };
 
-                var triangle_matrix: zalgebra.Mat4 = zalgebra.Mat4.fromTranslate(.{ .data = .{ 0, 0, @sin(time_s) * 4 } });
+                {
+                    var cursor_pos_x: c_int = 0;
+                    var cursor_pos_y: c_int = 0;
+
+                    _ = c.SDL_GetMouseState(&cursor_pos_x, &cursor_pos_y);
+
+                    const x_position = @as(f32, @floatFromInt(cursor_pos_x));
+                    const y_position = @as(f32, @floatFromInt(cursor_pos_y));
+
+                    const x_offset = x_position - last_mouse_x;
+                    const y_offset = last_mouse_y - y_position;
+
+                    last_mouse_x = x_position;
+                    last_mouse_y = y_position;
+
+                    if (true) {
+                        const sensitivity = 0.1;
+                        var camera_speed: @Vector(3, f32) = @splat(30 * frame_time);
+
+                        if (getKeyDown(c.SDL_SCANCODE_LCTRL)) {
+                            camera_speed *= @splat(2);
+                        }
+
+                        yaw += x_offset * sensitivity;
+                        pitch += y_offset * sensitivity;
+
+                        pitch = std.math.clamp(pitch, -89, 89);
+
+                        camera_front = zalgebra.Vec3.norm(.{ .data = .{
+                            @cos(zalgebra.toRadians(yaw)) * @cos(zalgebra.toRadians(-pitch)),
+                            @sin(zalgebra.toRadians(pitch)),
+                            @sin(zalgebra.toRadians(yaw)) * @cos(zalgebra.toRadians(-pitch)),
+                        } }).data;
+
+                        if (getKeyDown(c.SDL_SCANCODE_W)) {
+                            camera_translation += camera_speed * camera_front;
+                        } else if (getKeyDown(c.SDL_SCANCODE_S)) {
+                            camera_translation -= camera_speed * camera_front;
+                        }
+
+                        if (getKeyDown(c.SDL_SCANCODE_A)) {
+                            camera_translation -= zalgebra.Vec3.norm(zalgebra.Vec3.cross(.{ .data = camera_front }, .{ .data = .{ 0, 1, 0 } })).mul(.{ .data = camera_speed }).data;
+                        } else if (getKeyDown(c.SDL_SCANCODE_D)) {
+                            camera_translation += zalgebra.Vec3.norm(zalgebra.Vec3.cross(.{ .data = camera_front }, .{ .data = .{ 0, 1, 0 } })).mul(.{ .data = camera_speed }).data;
+                        }
+
+                        if (getKeyDown(c.SDL_SCANCODE_SPACE)) {
+                            camera_translation[1] += camera_speed[1];
+                        } else if (getKeyDown(c.SDL_SCANCODE_LSHIFT)) {
+                            camera_translation[1] -= camera_speed[1];
+                        }
+                    }
+
+                    camera_target = camera_translation + camera_front;
+                }
+
+                var triangle_matrix: zalgebra.Mat4 = zalgebra.Mat4.fromTranslate(.{ .data = .{ 0, 0, 1 + @sin(time_s) * 4 * 0 } });
 
                 triangle_matrix = triangle_matrix.mul(zalgebra.Mat4.fromEulerAngles(.{ .data = .{ 0, time_s * 180, 0 } }));
 
-                const view_matrix = zalgebra.Mat4.lookAt(.{ .data = .{ 0, @sin(time_s) * 3, -10 } }, .{ .data = .{ 0, 0, 0 } }, .{ .data = .{ 0, 1, 0 } });
+                const view_matrix = zalgebra.Mat4.lookAt(
+                    .{ .data = camera_translation },
+                    .{ .data = camera_target },
+                    .{ .data = .{ 0, 1, 0 } },
+                );
+
+                // const view_matrix = zalgebra.Mat4.lookAt(
+                //     .{ .data = camera_translation },
+                //     .{ .data = camera_target },
+                //     .{ .data = .{ 0, 1, 0 } },
+                // );
+
+                var window_size_x: c_int = 0;
+                var window_size_y: c_int = 0;
+
+                c.SDL_GetWindowSize(renderer.window, &window_size_x, &window_size_y);
 
                 const projection = zalgebra.Mat4.perspective(
                     45,
-                    @as(f32, @floatFromInt(window_height)) / @as(f32, @floatFromInt(window_width)),
+                    @as(f32, @floatFromInt(window_size_x)) / @as(f32, @floatFromInt(window_size_y)),
                     0.1,
                     1000,
                 );
@@ -566,9 +694,24 @@ pub fn main() !void {
                         .transform = triangle_matrix,
                         .view_projection = view_projection,
                     },
-                    mesh.vertices.len / 3,
+                    mesh.indices.len / 3,
                     TestPipeline,
                 );
+
+                for (0..10) |i| {
+                    renderer.pipelineDrawTriangles(
+                        render_pass,
+                        .{
+                            .texture = cog_image,
+                            .vertices = mesh.vertices,
+                            .indices = mesh.indices,
+                            .transform = zalgebra.Mat4.fromTranslate(.{ .data = .{ -5 + @as(f32, @floatFromInt(i)), 0, 1 } }),
+                            .view_projection = view_projection,
+                        },
+                        mesh.indices.len / 3,
+                        TestPipeline,
+                    );
+                }
             }
 
             // if (enable_ray_pass) {
@@ -602,9 +745,9 @@ pub fn main() !void {
         }
 
         const frame_end_time = std.time.microTimestamp();
-        const frame_time = frame_end_time - frame_start_time;
+        const current_frame_time = frame_end_time - frame_start_time;
 
-        std.log.err("frame_time: {d:.2}ms", .{@as(f32, @floatFromInt(frame_time)) / 1000});
+        std.log.err("frame_time: {d:.2}ms", .{@as(f32, @floatFromInt(current_frame_time)) / 1000});
 
         renderer.presentImage(render_target);
     }

@@ -6,7 +6,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/zig-out/bin/centralgfx",
             "args": [],
-            "cwd": "${workspaceFolder}/zig-out/bin/",
+            "cwd": "${workspaceFolder}/",
             "internalConsoleOptions": "neverOpen",
             "preLaunchTask": "build",
         }
