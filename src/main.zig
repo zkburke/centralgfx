@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("c_bindings.zig");
 const zigimg = @import("zigimg");
+const zalgebra = @import("zalgebra");
 const Image = @import("Image.zig");
 const Renderer = @import("Renderer.zig");
 const RayTracer = @import("RayTracer.zig");
@@ -24,6 +25,8 @@ const TestVertex = struct {
 const TestPipelineUniformInput = struct {
     texture: ?Image,
     vertices: []const TestVertex,
+    transform: zalgebra.Mat4,
+    view_projection: zalgebra.Mat4,
 };
 
 const TestPipelineFragmentInput = struct {
@@ -45,7 +48,7 @@ fn testClusterShader(
 fn testVertexShader(
     uniform: TestPipelineUniformInput,
     vertex_index: usize,
-) struct { @Vector(3, f32), TestPipelineFragmentInput } {
+) struct { @Vector(4, f32), TestPipelineFragmentInput } {
     const vertex = uniform.vertices[vertex_index];
 
     const output: TestPipelineFragmentInput = .{
@@ -53,11 +56,9 @@ fn testVertexShader(
         .uv = vertex.uv,
     };
 
-    return .{ .{
-        vertex.position[0] / @fabs(1.0 + vertex.position[2]),
-        vertex.position[1] / @fabs(1.0 + vertex.position[2]),
-        vertex.position[2],
-    }, output };
+    const position = uniform.view_projection.mul(uniform.transform).mulByVec4(.{ .data = .{ vertex.position[0], vertex.position[1], vertex.position[2], 1 } });
+
+    return .{ position.data, output };
 }
 
 fn testFragmentShader(
@@ -66,15 +67,14 @@ fn testFragmentShader(
     position: @Vector(3, f32),
     pixel: *Image.Color,
 ) void {
-    _ = uniform;
     _ = position;
 
     var color: @Vector(4, f32) = .{ 1, 1, 1, 1 };
 
     color *= input.color;
 
-    // if (uniform.texture) |texture|
-    // color *= texture.affineSample(input.uv).toNormalized();
+    if (uniform.texture) |texture|
+        color *= texture.affineSample(input.uv).toNormalized();
 
     pixel.* = Image.Color.fromNormalized(color);
 }
@@ -100,8 +100,8 @@ pub fn main() !void {
     const window_width = 640;
     const window_height = 480;
 
-    const surface_width = 640 / 8;
-    const surface_height = 480 / 8;
+    const surface_width = 640 / 4;
+    const surface_height = 480 / 4;
 
     var renderer: Renderer = undefined;
 
@@ -266,6 +266,8 @@ pub fn main() !void {
                 const uniforms = TestPipelineUniformInput{
                     .texture = cog_image,
                     .vertices = &line_vertices,
+                    .transform = zalgebra.Mat4.identity(),
+                    .view_projection = zalgebra.Mat4.identity(),
                 };
 
                 renderer.pipelineDrawLine(render_pass, uniforms, line_vertices.len, TestPipeline);
@@ -276,14 +278,14 @@ pub fn main() !void {
                     .{ 0, -0.5, 0 },
                 };
 
-                var triangle_vertices = [_]TestVertex{
+                const triangle_vertices = [_]TestVertex{
                     .{
-                        .position = .{ -0.5, 0.5, 1 },
+                        .position = .{ -0.5, 0.5, 0 },
                         .color = .{ 1, 0, 0, 1 },
                         .uv = .{ 0, 0 },
                     },
                     .{
-                        .position = .{ 0.5, 0.5, 0.5 },
+                        .position = .{ 0.5, 0.5, 0 },
                         .color = .{ 0, 1, 0, 1 },
                         .uv = .{ 1, 0 },
                     },
@@ -294,8 +296,20 @@ pub fn main() !void {
                     },
                 };
 
-                triangle_vertices[1].position[0] += @sin(time_s);
-                triangle_vertices[1].position[2] += @sin(time_s);
+                var triangle_matrix: zalgebra.Mat4 = zalgebra.Mat4.fromTranslate(.{ .data = .{ 0, 0, @sin(time_s) * 4 } });
+
+                triangle_matrix = triangle_matrix.mul(zalgebra.Mat4.fromEulerAngles(.{ .data = .{ 0, time_s * 360, 0 } }));
+
+                const view_matrix = zalgebra.Mat4.lookAt(.{ .data = .{ 0, 1, -5 } }, .{ .data = .{ 0, 0, 0 } }, .{ .data = .{ 0, 1, 0 } });
+
+                const projection = zalgebra.Mat4.perspective(
+                    45,
+                    @as(f32, @floatFromInt(window_height)) / @as(f32, @floatFromInt(window_width)),
+                    0.1,
+                    1000,
+                );
+
+                const view_projection = projection.mul(view_matrix);
 
                 for (&triangle) |*vertex| {
                     vertex.* = (vertex.* + @as(@Vector(3, f32), @splat(@as(f32, 1)))) / @as(@Vector(3, f32), @splat(@as(f32, 2)));
@@ -308,6 +322,8 @@ pub fn main() !void {
                     .{
                         .texture = cog_image,
                         .vertices = &triangle_vertices,
+                        .transform = triangle_matrix,
+                        .view_projection = view_projection,
                     },
                     1,
                     TestPipeline,

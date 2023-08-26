@@ -17,6 +17,9 @@ pub fn build(b: *std.build.Builder) void {
     exe.addAnonymousModule("zigimg", .{
         .source_file = std.build.LazyPath.relative("lib/zigimg/zigimg.zig"),
     });
+    exe.addAnonymousModule("zalgebra", .{
+        .source_file = std.build.LazyPath.relative("lib/zalgebra/src/main.zig"),
+    });
 
     b.installArtifact(exe);
 
