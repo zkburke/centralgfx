@@ -35,6 +35,26 @@ pub fn init(
     self.sdl_texture = c.SDL_CreateTexture(self.sdl_renderer, c.SDL_PIXELFORMAT_ABGR8888, c.SDL_TEXTUREACCESS_STREAMING, @as(c_int, @intCast(surface_width)), @as(c_int, @intCast(surface_height)));
 
     self.swapchain_image = try allocator.alloc(Image.Color, surface_width * surface_height);
+
+    const S = struct {
+        pub fn windowEvent(_: ?*anyopaque, event: [*c]c.SDL_Event) callconv(.C) c_int {
+            switch (event.*.type) {
+                c.SDL_WINDOWEVENT => {
+                    switch (event.*.window.type) {
+                        c.SDL_WINDOWEVENT_CLOSE => {
+                            std.os.exit(1);
+                        },
+                        else => {},
+                    }
+                },
+                else => {},
+            }
+
+            return 0;
+        }
+    };
+
+    c.SDL_AddEventWatch(&S.windowEvent, null);
 }
 
 pub fn deinit(self: Renderer, allocator: std.mem.Allocator) void {
@@ -49,9 +69,20 @@ pub fn shouldWindowClose(self: Renderer) bool {
 
     var sdl_event: c.SDL_Event = undefined;
 
-    _ = c.SDL_PollEvent(&sdl_event);
+    while (c.SDL_PollEvent(&sdl_event) != 0) {
+        switch (sdl_event.type) {
+            c.SDL_QUIT => return true,
+            c.SDL_WINDOWEVENT => {
+                switch (sdl_event.window.type) {
+                    c.SDL_WINDOWEVENT_CLOSE => return true,
+                    else => {},
+                }
+            },
+            else => {},
+        }
+    }
 
-    return sdl_event.type == c.SDL_QUIT;
+    return false;
 }
 
 pub const Pass = struct {

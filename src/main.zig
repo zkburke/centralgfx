@@ -361,8 +361,8 @@ pub fn main() !void {
     const window_width = 640;
     const window_height = 480;
 
-    const surface_width = 640 / 1;
-    const surface_height = 480 / 1;
+    const surface_width = 640 / 2;
+    const surface_height = 480 / 2;
 
     var renderer: Renderer = undefined;
 
@@ -475,15 +475,13 @@ pub fn main() !void {
     var roll: f32 = 0;
     _ = roll;
 
+    var camera_enable: bool = false;
+
     var camera_front: @Vector(3, f32) = .{ 0, 0, 0 };
     var camera_target: @Vector(3, f32) = .{ 0, 0, 0 };
     var camera_translation: @Vector(3, f32) = .{ 0, 0, -1 };
 
     var frame_time: f32 = 0.016;
-
-    _ = c.SDL_CaptureMouse(c.SDL_TRUE);
-
-    _ = c.SDL_ShowCursor(0);
 
     while (!renderer.shouldWindowClose()) {
         const frame_start_time = std.time.microTimestamp();
@@ -595,7 +593,7 @@ pub fn main() !void {
                     last_mouse_x = x_position;
                     last_mouse_y = y_position;
 
-                    if (true) {
+                    if (camera_enable) {
                         const sensitivity = 0.1;
                         var camera_speed: @Vector(3, f32) = @splat(30 * frame_time);
 
@@ -634,6 +632,14 @@ pub fn main() !void {
                     }
 
                     camera_target = camera_translation + camera_front;
+                }
+
+                if (getKeyDown(c.SDL_SCANCODE_TAB)) {
+                    camera_enable = !camera_enable;
+
+                    c.SDL_SetWindowGrab(renderer.window, @intFromBool(camera_enable));
+                    _ = c.SDL_CaptureMouse(@intFromBool(camera_enable));
+                    _ = c.SDL_SetRelativeMouseMode(@intFromBool(camera_enable));
                 }
 
                 var triangle_matrix: zalgebra.Mat4 = zalgebra.Mat4.fromTranslate(.{ .data = .{ 0, 0, 1 + @sin(time_s) * 4 * 0 } });
@@ -698,19 +704,21 @@ pub fn main() !void {
                     TestPipeline,
                 );
 
-                for (0..10) |i| {
-                    renderer.pipelineDrawTriangles(
-                        render_pass,
-                        .{
-                            .texture = cog_image,
-                            .vertices = mesh.vertices,
-                            .indices = mesh.indices,
-                            .transform = zalgebra.Mat4.fromTranslate(.{ .data = .{ -5 + @as(f32, @floatFromInt(i)), 0, 1 } }),
-                            .view_projection = view_projection,
-                        },
-                        mesh.indices.len / 3,
-                        TestPipeline,
-                    );
+                for (0..5) |x| {
+                    for (0..5) |y| {
+                        renderer.pipelineDrawTriangles(
+                            render_pass,
+                            .{
+                                .texture = cog_image,
+                                .vertices = mesh.vertices,
+                                .indices = mesh.indices,
+                                .transform = zalgebra.Mat4.fromTranslate(.{ .data = .{ -5 + @as(f32, @floatFromInt(y)), 0, -5 + @as(f32, @floatFromInt(x)) } }).rotate(@sin(time_s), .{ .data = .{ 0, 0, 0 } }),
+                                .view_projection = view_projection,
+                            },
+                            mesh.indices.len / 3,
+                            TestPipeline,
+                        );
+                    }
                 }
             }
 
