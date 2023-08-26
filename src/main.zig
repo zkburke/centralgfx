@@ -133,13 +133,13 @@ pub fn loadMesh(allocator: std.mem.Allocator, file_path: []const u8) !Mesh {
     };
 
     var model_vertices = std.ArrayList(TestVertex).init(allocator);
-    errdefer model_vertices.deinit();
+    defer model_vertices.deinit();
 
     var model_vertex_positions = std.ArrayList(@Vector(3, f32)).init(allocator);
-    errdefer model_vertex_positions.deinit();
+    defer model_vertex_positions.deinit();
 
     var model_indices = std.ArrayList(u32).init(allocator);
-    errdefer model_indices.deinit();
+    defer model_indices.deinit();
 
     for (gltf.data.nodes.items) |node| {
         if (node.mesh == null) continue;
@@ -297,11 +297,17 @@ pub fn loadMesh(allocator: std.mem.Allocator, file_path: []const u8) !Mesh {
     }
 
     var mesh: Mesh = .{
-        .vertices = model_vertices.items,
-        .indices = model_indices.items,
+        .vertices = try model_vertices.toOwnedSlice(),
+        .indices = try model_indices.toOwnedSlice(),
     };
 
     return mesh;
+}
+
+fn freeMesh(mesh: *Mesh, allocator: std.mem.Allocator) void {
+    allocator.free(mesh.vertices);
+    allocator.free(mesh.indices);
+    mesh.* = undefined;
 }
 
 pub fn main() !void {
@@ -345,6 +351,7 @@ pub fn main() !void {
     defer cog_image.deinit(allocator);
 
     var mesh = try loadMesh(allocator, "src/res/light_test.gltf");
+    defer freeMesh(&mesh, allocator);
 
     const enable_raster_pass = true;
     var enable_ray_pass = false;

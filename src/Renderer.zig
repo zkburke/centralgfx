@@ -521,6 +521,7 @@ fn pipelineRasteriseTriangle(
     fragment_inputs: [3]pipeline.FragmentInput,
 ) void {
     _ = self;
+    @setRuntimeSafety(false);
 
     const Interpolators = pipeline.FragmentInput;
 
