@@ -2,6 +2,7 @@ const std = @import("std");
 const c = @import("c_bindings.zig");
 const zigimg = @import("zigimg");
 const zalgebra = @import("zalgebra");
+const zgltf = @import("zgltf");
 const Image = @import("Image.zig");
 const Renderer = @import("Renderer.zig");
 const RayTracer = @import("RayTracer.zig");
@@ -25,6 +26,7 @@ const TestVertex = struct {
 const TestPipelineUniformInput = struct {
     texture: ?Image,
     vertices: []const TestVertex,
+    indices: []const u32,
     transform: zalgebra.Mat4,
     view_projection: zalgebra.Mat4,
 };
@@ -49,7 +51,8 @@ fn testVertexShader(
     uniform: TestPipelineUniformInput,
     vertex_index: usize,
 ) struct { @Vector(4, f32), TestPipelineFragmentInput } {
-    const vertex = uniform.vertices[vertex_index];
+    const index = uniform.indices[vertex_index];
+    const vertex = uniform.vertices[index];
 
     const output: TestPipelineFragmentInput = .{
         .color = vertex.color,
@@ -86,6 +89,220 @@ pub const TestPipeline = Renderer.Pipeline(
     testVertexShader,
     testFragmentShader,
 );
+
+pub const Mesh = struct {
+    vertices: []TestVertex,
+    indices: []u32,
+};
+
+pub fn loadMesh(allocator: std.mem.Allocator, file_path: []const u8) !Mesh {
+    const file_directory_name = std.fs.path.dirname(file_path) orelse unreachable;
+
+    var file_directory = try std.fs.cwd().openDir(file_directory_name, .{});
+    defer file_directory.close();
+
+    const file = try std.fs.cwd().openFile(file_path, .{});
+    defer file.close();
+
+    const file_data = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+    defer allocator.free(file_data);
+
+    var gltf = zgltf.init(allocator);
+    defer gltf.deinit();
+
+    try gltf.parse(file_data);
+
+    const buffer_file_datas = try allocator.alloc([]const u8, gltf.data.buffers.items.len);
+    defer allocator.free(buffer_file_datas);
+
+    for (gltf.data.buffers.items, 0..) |buffer, i| {
+        if (buffer.uri == null) continue;
+
+        std.log.info("{s}", .{buffer.uri.?});
+
+        const bin_file = try file_directory.openFile(buffer.uri.?, .{});
+        defer bin_file.close();
+
+        const bin_file_data = try bin_file.readToEndAlloc(allocator, std.math.maxInt(usize));
+
+        buffer_file_datas[i] = bin_file_data;
+    }
+
+    defer for (buffer_file_datas) |buffer_file_data| {
+        allocator.free(buffer_file_data);
+    };
+
+    var model_vertices = std.ArrayList(TestVertex).init(allocator);
+    errdefer model_vertices.deinit();
+
+    var model_vertex_positions = std.ArrayList(@Vector(3, f32)).init(allocator);
+    errdefer model_vertex_positions.deinit();
+
+    var model_indices = std.ArrayList(u32).init(allocator);
+    errdefer model_indices.deinit();
+
+    for (gltf.data.nodes.items) |node| {
+        if (node.mesh == null) continue;
+
+        const transform_matrix = zgltf.getGlobalTransform(&gltf.data, node);
+
+        const mesh: *zgltf.Mesh = &gltf.data.meshes.items[node.mesh.?];
+
+        std.log.info("mesh.primitive_count = {}", .{mesh.primitives.items.len});
+
+        for (mesh.primitives.items) |primitive| {
+            const vertex_start = model_vertices.items.len;
+            _ = vertex_start;
+            const index_start = model_indices.items.len;
+            _ = index_start;
+
+            var vertex_count: usize = 0;
+
+            var positions = std.ArrayList(f32).init(allocator);
+            defer positions.deinit();
+
+            var normals = std.ArrayList(f32).init(allocator);
+            defer normals.deinit();
+
+            var texture_coordinates = std.ArrayList(f32).init(allocator);
+            defer texture_coordinates.deinit();
+
+            var colors = std.ArrayList(f32).init(allocator);
+            defer colors.deinit();
+
+            for (primitive.attributes.items) |attribute| {
+                switch (attribute) {
+                    .position => |accessor_index| {
+                        const accessor = gltf.data.accessors.items[accessor_index];
+                        const buffer_view = gltf.data.buffer_views.items[accessor.buffer_view.?];
+                        const buffer_data = buffer_file_datas[buffer_view.buffer];
+
+                        vertex_count = @as(usize, @intCast(accessor.count));
+
+                        try positions.ensureTotalCapacity(@as(usize, @intCast(accessor.count)));
+
+                        gltf.getDataFromBufferView(f32, &positions, accessor, buffer_data);
+                    },
+                    .normal => |accessor_index| {
+                        const accessor = gltf.data.accessors.items[accessor_index];
+                        const buffer_view = gltf.data.buffer_views.items[accessor.buffer_view.?];
+                        const buffer_data = buffer_file_datas[buffer_view.buffer];
+
+                        try normals.ensureTotalCapacity(@as(usize, @intCast(accessor.count)));
+
+                        gltf.getDataFromBufferView(f32, &normals, accessor, buffer_data);
+                    },
+                    .tangent => {},
+                    .texcoord => |accessor_index| {
+                        const accessor = gltf.data.accessors.items[accessor_index];
+                        const buffer_view = gltf.data.buffer_views.items[accessor.buffer_view.?];
+                        const buffer_data = buffer_file_datas[buffer_view.buffer];
+
+                        try texture_coordinates.ensureTotalCapacity(@as(usize, @intCast(accessor.count)));
+
+                        gltf.getDataFromBufferView(f32, &texture_coordinates, accessor, buffer_data);
+                    },
+                    .color => |accessor_index| {
+                        const accessor = gltf.data.accessors.items[accessor_index];
+                        const buffer_view = gltf.data.buffer_views.items[accessor.buffer_view.?];
+                        const buffer_data = buffer_file_datas[buffer_view.buffer];
+
+                        try colors.ensureTotalCapacity(@as(usize, @intCast(accessor.count)));
+
+                        std.debug.assert(accessor.component_type == .float);
+
+                        gltf.getDataFromBufferView(f32, &colors, accessor, buffer_data);
+                    },
+                    .joints => {},
+                    .weights => {},
+                }
+            }
+
+            std.debug.assert(vertex_count != 0);
+
+            try model_vertices.ensureTotalCapacity(model_vertices.items.len + vertex_count);
+
+            //Vertices
+            {
+                var position_index: usize = 0;
+                var normal_index: usize = 0;
+                var uv_index: usize = 0;
+                var color_index: usize = 0;
+
+                std.log.info("vertex position accessor.count = {}", .{vertex_count});
+
+                while (position_index < vertex_count * 3) : ({
+                    position_index += 3;
+                    normal_index += 3;
+                    uv_index += 2;
+                    color_index += 4;
+                }) {
+                    const position_source_x = positions.items[position_index];
+                    const position_source_y = positions.items[position_index + 1];
+                    const position_source_z = positions.items[position_index + 2];
+
+                    const position_vector = @Vector(3, f32){ position_source_x, position_source_y, position_source_z };
+                    const uv: @Vector(2, f32) = .{ texture_coordinates.items[uv_index], texture_coordinates.items[uv_index + 1] };
+                    const color: @Vector(4, f32) = if (colors.items.len != 0) .{ colors.items[color_index], colors.items[color_index + 1], colors.items[color_index + 2], 1 } else @splat(1);
+                    _ = color;
+
+                    const position_transformed = (zalgebra.Mat4{ .data = transform_matrix }).mulByVec4(.{ .data = .{
+                        position_vector[0],
+                        position_vector[1],
+                        position_vector[2],
+                        1,
+                    } });
+
+                    const triangle_index_color = @as(f32, @floatFromInt(position_index / 6)) / @as(f32, @floatFromInt(vertex_count));
+                    _ = triangle_index_color;
+
+                    try model_vertex_positions.append(position_vector);
+                    try model_vertices.append(.{
+                        .position = .{ position_transformed.data[0], position_transformed.data[1], position_transformed.data[2] },
+                        .uv = uv,
+                        .color = .{ 1, 1, 1, 1 },
+                    });
+                }
+            }
+
+            //Indices
+            {
+                const index_accessor = gltf.data.accessors.items[primitive.indices.?];
+                const buffer_view = gltf.data.buffer_views.items[index_accessor.buffer_view.?];
+                const buffer_data = buffer_file_datas[buffer_view.buffer];
+
+                switch (index_accessor.component_type) {
+                    .byte => unreachable,
+                    .unsigned_byte => unreachable,
+                    .short => unreachable,
+                    .unsigned_short => {
+                        var indices_u16 = std.ArrayList(u16).init(allocator);
+                        defer indices_u16.deinit();
+
+                        gltf.getDataFromBufferView(u16, &indices_u16, index_accessor, buffer_data);
+
+                        try model_indices.ensureTotalCapacity(indices_u16.items.len);
+
+                        for (indices_u16.items) |index_u16| {
+                            try model_indices.append(@as(u32, index_u16));
+                        }
+                    },
+                    .unsigned_integer => {
+                        gltf.getDataFromBufferView(u32, &model_indices, index_accessor, buffer_data);
+                    },
+                    .float => unreachable,
+                }
+            }
+        }
+    }
+
+    var mesh: Mesh = .{
+        .vertices = model_vertices.items,
+        .indices = model_indices.items,
+    };
+
+    return mesh;
+}
 
 pub fn main() !void {
     var general_allocator = std.heap.GeneralPurposeAllocator(.{}){};
@@ -126,6 +343,8 @@ pub fn main() !void {
         cog_image_loaded.height,
     );
     defer cog_image.deinit(allocator);
+
+    var mesh = try loadMesh(allocator, "src/res/light_test.gltf");
 
     const enable_raster_pass = true;
     var enable_ray_pass = false;
@@ -235,7 +454,7 @@ pub fn main() !void {
                 };
 
                 for (tris) |tri| {
-                    renderer.drawTriangle(
+                    if (false) renderer.drawTriangle(
                         render_pass,
                         .{
                             .{ tri[0][0] + @sin(time_s), tri[0][1], tri[0][2] },
@@ -266,6 +485,7 @@ pub fn main() !void {
                 const uniforms = TestPipelineUniformInput{
                     .texture = cog_image,
                     .vertices = &line_vertices,
+                    .indices = &.{ 0, 1, 2, 3 },
                     .transform = zalgebra.Mat4.identity(),
                     .view_projection = zalgebra.Mat4.identity(),
                 };
@@ -298,9 +518,9 @@ pub fn main() !void {
 
                 var triangle_matrix: zalgebra.Mat4 = zalgebra.Mat4.fromTranslate(.{ .data = .{ 0, 0, @sin(time_s) * 4 } });
 
-                triangle_matrix = triangle_matrix.mul(zalgebra.Mat4.fromEulerAngles(.{ .data = .{ 0, time_s * 360, 0 } }));
+                triangle_matrix = triangle_matrix.mul(zalgebra.Mat4.fromEulerAngles(.{ .data = .{ 0, time_s * 180, 0 } }));
 
-                const view_matrix = zalgebra.Mat4.lookAt(.{ .data = .{ 0, 1, -5 } }, .{ .data = .{ 0, 0, 0 } }, .{ .data = .{ 0, 1, 0 } });
+                const view_matrix = zalgebra.Mat4.lookAt(.{ .data = .{ 0, @sin(time_s) * 3, -10 } }, .{ .data = .{ 0, 0, 0 } }, .{ .data = .{ 0, 1, 0 } });
 
                 const projection = zalgebra.Mat4.perspective(
                     45,
@@ -315,17 +535,31 @@ pub fn main() !void {
                     vertex.* = (vertex.* + @as(@Vector(3, f32), @splat(@as(f32, 1)))) / @as(@Vector(3, f32), @splat(@as(f32, 2)));
                 }
 
-                renderer.drawTriangle(render_pass, triangle);
+                // renderer.drawTriangle(render_pass, triangle);
 
                 renderer.pipelineDrawTriangles(
                     render_pass,
                     .{
                         .texture = cog_image,
                         .vertices = &triangle_vertices,
+                        .indices = &.{ 0, 1, 2 },
                         .transform = triangle_matrix,
                         .view_projection = view_projection,
                     },
                     1,
+                    TestPipeline,
+                );
+
+                renderer.pipelineDrawTriangles(
+                    render_pass,
+                    .{
+                        .texture = cog_image,
+                        .vertices = mesh.vertices,
+                        .indices = mesh.indices,
+                        .transform = triangle_matrix,
+                        .view_projection = view_projection,
+                    },
+                    mesh.vertices.len / 3,
                     TestPipeline,
                 );
             }

@@ -400,6 +400,11 @@ fn pipelineDrawTriangle(
 
     var triangle: [3]@Vector(4, f32) = .{ fragment_input_0[0], fragment_input_1[0], fragment_input_2[0] };
 
+    //Correct for upside down meshes
+    for (&triangle) |*point| {
+        point[1] = 1 - point[1];
+    }
+
     for (&triangle) |*point| {
         point[0] /= point[3];
         point[1] /= point[3];
@@ -413,7 +418,7 @@ fn pipelineDrawTriangle(
     });
 
     //backface cull
-    if (false and two_triangle_area < 0) {
+    if (true and two_triangle_area > 0) {
         return;
     }
 
@@ -728,6 +733,11 @@ fn pipelineRasteriseTriangle(
                 defer {
                     factor += factor_step;
                     factor1 += factor_step1;
+                }
+
+                //Wireframe
+                if (false and pixel_x != span.x0 and pixel_x != span.x1 - 1) {
+                    continue;
                 }
 
                 //not needed if clipping is perfect
