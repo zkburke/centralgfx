@@ -75,8 +75,7 @@ fn testFragmentShader(
     uniform: TestPipelineUniformInput,
     input: TestPipelineFragmentInput,
     position: @Vector(3, f32),
-    pixel: *Image.Color,
-) void {
+) @Vector(4, f32) {
     _ = position;
     var color: @Vector(4, f32) = .{ 1, 1, 1, 1 };
 
@@ -101,12 +100,10 @@ fn testFragmentShader(
     color[2] = std.math.clamp(color[2], 0, 1);
     color[3] = std.math.clamp(color[3], 0, 1);
 
-    pixel.* = Image.Color.fromNormalized(color);
-
     const draw_depth_factor = 1;
     _ = draw_depth_factor;
 
-    // pixel.* = Image.Color.fromNormalized(.{ position[2] * draw_depth_factor, position[2] * draw_depth_factor, position[2] * draw_depth_factor, 1 });
+    return color;
 }
 
 pub const TestPipeline = Renderer.Pipeline(
@@ -348,6 +345,10 @@ fn getKeyDown(key: c.SDL_Scancode) bool {
     return keys[key] == 1;
 }
 
+const RasterUnit = @import("raster/RasterUnit.zig");
+const geometry_processor = @import("raster/geometry_processor.zig");
+const CommandBuffer = @import("CommandBuffer.zig");
+
 pub fn main() !void {
     var general_allocator = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = general_allocator.deinit();
@@ -365,6 +366,18 @@ pub fn main() !void {
     const surface_height = 480;
 
     var renderer: Renderer = undefined;
+
+    var raster_unit: RasterUnit = .{
+        .pipeline = undefined,
+        .uniform = undefined,
+        .render_pass = undefined,
+        .renderer = &renderer,
+    };
+
+    var command_buffer = CommandBuffer{
+        .allocator = allocator,
+    };
+    defer command_buffer.deinit();
 
     try renderer.init(allocator, window_width, window_height, surface_width, surface_height, "CentralGfx");
     defer renderer.deinit(allocator);
@@ -491,7 +504,7 @@ pub fn main() !void {
             @memset(render_target.texel_buffer, Image.Color.fromNormalized(.{ 0.25, 0.25, 1, 1 }));
             @memset(depth_target, 1);
 
-            const render_pass = Renderer.Pass{
+            var render_pass = Renderer.Pass{
                 .color_image = render_target,
                 .depth_buffer = depth_target,
             };
@@ -691,7 +704,7 @@ pub fn main() !void {
                     TestPipeline,
                 );
 
-                renderer.pipelineDrawTriangles(
+                if (false) renderer.pipelineDrawTriangles(
                     render_pass,
                     .{
                         .texture = cog_image,
@@ -720,6 +733,27 @@ pub fn main() !void {
                         );
                     }
                 }
+
+                command_buffer.begin();
+
+                command_buffer.beginRasterPass(&render_pass);
+
+                var mesh_uniforms: TestPipelineUniformInput = .{
+                    .texture = cog_image,
+                    .vertices = mesh.vertices,
+                    .indices = mesh.indices,
+                    .transform = triangle_matrix,
+                    .view_projection = view_projection,
+                };
+
+                command_buffer.bindPipeline(&TestPipeline.runtime);
+                command_buffer.draw(&mesh_uniforms, @intCast(mesh.indices.len));
+
+                command_buffer.endRasterPass();
+
+                command_buffer.end();
+
+                @import("raster/command_processor.zig").submit(&raster_unit, &command_buffer);
             }
 
             // if (enable_ray_pass) {

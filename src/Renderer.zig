@@ -132,28 +132,20 @@ fn vectorLerp(comptime T: type, comptime n: usize, p0: @Vector(n, T), p1: @Vecto
     return @mulAdd(@TypeOf(p0), p0, @as(@Vector(n, T), @splat(1)) - p2, p1 * p2);
 }
 
-pub const PrimitiveType = enum {
-    triangle,
-    line,
-    point,
-};
-
-pub const PolygonFillMode = enum {
-    fill,
-    line,
-};
-
 pub fn Pipeline(
     comptime UniformInputType: type,
     comptime FragmentInputType: type,
     comptime clusterShaderFn: anytype,
     comptime vertexShaderFn: anytype,
     comptime fragmentShaderFn: anytype,
-    comptime _polygon_fill_mode: PolygonFillMode,
+    comptime _polygon_fill_mode: RuntimePipeline.PolygonFillMode,
 ) type {
     _ = clusterShaderFn;
-    const VertexShaderFn = fn (uniform: UniformInputType, vertex_index: usize) struct { @Vector(4, f32), FragmentInputType };
-    const FragmentShaderFn = fn (uniform: UniformInputType, input: FragmentInputType, position: @Vector(3, f32), pixel: *Image.Color) void;
+    const VertexShaderFn = fn (
+        uniform: UniformInputType,
+        vertex_index: usize,
+    ) struct { @Vector(4, f32), FragmentInputType };
+    const FragmentShaderFn = fn (uniform: UniformInputType, input: FragmentInputType, position: @Vector(3, f32)) @Vector(4, f32);
 
     return struct {
         pub const UniformInput = UniformInputType;
@@ -162,37 +154,46 @@ pub fn Pipeline(
         pub const vertexShader: VertexShaderFn = vertexShaderFn;
         pub const fragmentShader: FragmentShaderFn = fragmentShaderFn;
 
-        pub const polygon_fill_mode: PolygonFillMode = _polygon_fill_mode;
+        pub const polygon_fill_mode: RuntimePipeline.PolygonFillMode = _polygon_fill_mode;
+
+        pub fn runtimeVertexShader(
+            uniform: *const anyopaque,
+            vertex_index: usize,
+            fragment_input: *anyopaque,
+        ) @Vector(4, f32) {
+            const uniform_read: *const UniformInputType = @ptrCast(@alignCast(uniform));
+            const fragment_input_write: *FragmentInputType = @ptrCast(@alignCast(fragment_input));
+
+            const output = vertexShader(uniform_read.*, vertex_index);
+
+            fragment_input_write.* = output[1];
+
+            return output[0];
+        }
+
+        pub fn fragmentShaderFnRuntime(
+            uniform: *const anyopaque,
+            fragment_input: *const anyopaque,
+        ) @Vector(4, f32) {
+            const uniform_read: *const UniformInputType = @ptrCast(@alignCast(uniform));
+            const fragment_input_read: *const FragmentInputType = @ptrCast(@alignCast(fragment_input));
+
+            return fragmentShader(
+                uniform_read.*,
+                fragment_input_read.*,
+                undefined,
+            );
+        }
+
+        pub const runtime: RuntimePipeline = .{
+            .polygon_fill_mode = polygon_fill_mode,
+            .vertexShader = &runtimeVertexShader,
+            .fragmentShader = &fragmentShaderFnRuntime,
+        };
     };
 }
 
-pub fn pipelineDraw(
-    self: Renderer,
-    pass: Pass,
-    primitive_type: PrimitiveType,
-    uniform: anytype,
-    vertex_count: usize,
-    comptime pipeline: type,
-) void {
-    _ = pipeline;
-    _ = vertex_count;
-    _ = uniform;
-    _ = primitive_type;
-    _ = pass;
-    _ = self;
-}
-
-fn transformClipToFragmentSpace(width: usize, height: usize, point: @Vector(3, f32)) @Vector(2, usize) {
-    _ = height;
-    _ = width;
-    _ = point;
-}
-
-fn transformFragmentToClipSpace(width: usize, height: usize, point: @Vector(2, usize)) @Vector(3, f32) {
-    _ = height;
-    _ = width;
-    _ = point;
-}
+const RuntimePipeline = @import("Pipeline.zig");
 
 pub fn pipelineDrawTriangles(
     self: Renderer,
@@ -201,7 +202,6 @@ pub fn pipelineDrawTriangles(
     triangle_count: usize,
     comptime pipeline: anytype,
 ) void {
-    @setRuntimeSafety(false);
     for (0..triangle_count) |index| {
         self.pipelineDrawTriangle(pass, uniform, index, pipeline);
     }
@@ -667,11 +667,35 @@ fn pipelineDrawTriangle(
 ) void {
     @setFloatMode(.Optimized);
 
-    const fragment_input_0 = @call(.always_inline, pipeline.vertexShader, .{ uniform, triangle_index * 3 + 0 });
-    const fragment_input_1 = @call(.always_inline, pipeline.vertexShader, .{ uniform, triangle_index * 3 + 1 });
-    const fragment_input_2 = @call(.always_inline, pipeline.vertexShader, .{ uniform, triangle_index * 3 + 2 });
+    var pipeline_runtime: RuntimePipeline = pipeline.runtime;
 
-    var triangle: [3]@Vector(4, f32) = .{ fragment_input_0[0], fragment_input_1[0], fragment_input_2[0] };
+    const use_runtime: bool = true;
+
+    var fragment_input_0: pipeline.FragmentInput = undefined;
+    var fragment_input_1: pipeline.FragmentInput = undefined;
+    var fragment_input_2: pipeline.FragmentInput = undefined;
+
+    var triangle: [3]@Vector(4, f32) = undefined;
+
+    if (use_runtime) {
+        var _uniform: pipeline.UniformInput = uniform;
+
+        triangle[0] = pipeline_runtime.vertexShader(&_uniform, triangle_index * 3 + 0, &fragment_input_0);
+        triangle[1] = pipeline_runtime.vertexShader(&_uniform, triangle_index * 3 + 1, &fragment_input_1);
+        triangle[2] = pipeline_runtime.vertexShader(&_uniform, triangle_index * 3 + 2, &fragment_input_2);
+    } else {
+        const vertex_result_0 = @call(.always_inline, pipeline.vertexShader, .{ uniform, triangle_index * 3 + 0 });
+        const vertex_result_1 = @call(.always_inline, pipeline.vertexShader, .{ uniform, triangle_index * 3 + 1 });
+        const vertex_result_2 = @call(.always_inline, pipeline.vertexShader, .{ uniform, triangle_index * 3 + 2 });
+
+        triangle[0] = vertex_result_0[0];
+        triangle[1] = vertex_result_1[0];
+        triangle[2] = vertex_result_2[0];
+
+        fragment_input_0 = vertex_result_0[1];
+        fragment_input_1 = vertex_result_1[1];
+        fragment_input_2 = vertex_result_2[1];
+    }
 
     //Correct for upside down meshes
     //TODO: use a 2x2 clip transform matrix
@@ -725,9 +749,9 @@ fn pipelineDrawTriangle(
             uniform,
             triangle,
             .{
-                fragment_input_0[1],
-                fragment_input_1[1],
-                fragment_input_2[1],
+                fragment_input_0,
+                fragment_input_1,
+                fragment_input_2,
             },
         );
 
@@ -739,7 +763,7 @@ fn pipelineDrawTriangle(
         500,
         500,
         .{ triangle[0], triangle[1], triangle[2] },
-        .{ fragment_input_0[1], fragment_input_1[1], fragment_input_2[1] },
+        .{ fragment_input_0, fragment_input_1, fragment_input_2 },
     );
 
     for (0..clip_result.index_count / 3) |clip_triangle_index| {
@@ -1018,12 +1042,24 @@ fn pipelineRasteriseTriangle(
 
                 const pixel = render_pass.color_image.texelFetch(.{ @intCast(pixel_x), @intCast(pixel_y) });
 
-                @call(.always_inline, pipeline.fragmentShader, .{
-                    _uniform,
-                    fragment_input,
-                    point,
-                    pixel,
-                });
+                var fragment_color: @Vector(4, f32) = undefined;
+
+                const use_runtime: bool = true;
+
+                if (use_runtime) {
+                    var __uniform: pipeline.UniformInput = _uniform;
+                    var _fragment_input = fragment_input;
+
+                    fragment_color = pipeline.runtime.fragmentShader(&__uniform, &_fragment_input);
+                } else {
+                    fragment_color = @call(.always_inline, pipeline.fragmentShader, .{
+                        _uniform,
+                        fragment_input,
+                        point,
+                    });
+                }
+
+                pixel.* = Image.Color.fromNormalized(fragment_color);
             }
         }
     };
