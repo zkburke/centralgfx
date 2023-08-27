@@ -361,8 +361,8 @@ pub fn main() !void {
     const window_width = 640;
     const window_height = 480;
 
-    const surface_width = 640 / 2;
-    const surface_height = 480 / 2;
+    const surface_width = 640;
+    const surface_height = 480;
 
     var renderer: Renderer = undefined;
 
@@ -470,16 +470,16 @@ pub fn main() !void {
     var last_mouse_x: f32 = 0;
     var last_mouse_y: f32 = 0;
 
-    var yaw: f32 = 0;
-    var pitch: f32 = 0;
+    var yaw: f32 = 233;
+    var pitch: f32 = -33.5;
     var roll: f32 = 0;
     _ = roll;
 
     var camera_enable: bool = false;
 
-    var camera_front: @Vector(3, f32) = .{ 0, 0, 0 };
-    var camera_target: @Vector(3, f32) = .{ 0, 0, 0 };
-    var camera_translation: @Vector(3, f32) = .{ 0, 0, -1 };
+    var camera_front: @Vector(3, f32) = .{ -0.5, -0.5, -0.5 };
+    var camera_target: @Vector(3, f32) = .{ 3.5, 4.5, 5.5 };
+    var camera_translation: @Vector(3, f32) = .{ 4, 5, -6 };
 
     var frame_time: f32 = 0.016;
 
@@ -684,7 +684,7 @@ pub fn main() !void {
                         .texture = cog_image,
                         .vertices = &triangle_vertices,
                         .indices = &.{ 0, 1, 2 },
-                        .transform = triangle_matrix,
+                        .transform = zalgebra.Mat4.fromTranslate(.{ .data = .{ 4, 1, 4 } }),
                         .view_projection = view_projection,
                     },
                     1,
@@ -704,15 +704,15 @@ pub fn main() !void {
                     TestPipeline,
                 );
 
-                for (0..5) |x| {
-                    for (0..5) |y| {
+                for (0..0) |x| {
+                    for (0..2) |y| {
                         renderer.pipelineDrawTriangles(
                             render_pass,
                             .{
                                 .texture = cog_image,
                                 .vertices = mesh.vertices,
                                 .indices = mesh.indices,
-                                .transform = zalgebra.Mat4.fromTranslate(.{ .data = .{ -5 + @as(f32, @floatFromInt(y)), 0, -5 + @as(f32, @floatFromInt(x)) } }).rotate(@sin(time_s), .{ .data = .{ 0, 0, 0 } }),
+                                .transform = zalgebra.Mat4.fromTranslate(.{ .data = .{ -5 + @as(f32, @floatFromInt(y)), 0, -5 + @as(f32, @floatFromInt(x)) } }),
                                 .view_projection = view_projection,
                             },
                             mesh.indices.len / 3,
