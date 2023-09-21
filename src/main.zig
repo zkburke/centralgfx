@@ -24,12 +24,26 @@ const TestVertex = struct {
     normal: @Vector(3, f32) = .{ 0, 1, 0 },
 };
 
-const TestPipelineUniformInput = struct {
+pub const PointLight = struct {
+    position: @Vector(3, f32),
+    color: @Vector(3, f32),
+    intensity: f32,
+};
+
+pub const TestPipelineUniformInput = struct {
     texture: ?Image,
     vertices: []const TestVertex,
     indices: []const u32,
+    lights: []const PointLight = &.{
+        .{
+            .position = .{ -2, 3, 0 },
+            .color = .{ 1, 1, 1 },
+            .intensity = 10,
+        },
+    },
     transform: zalgebra.Mat4,
     view_projection: zalgebra.Mat4,
+    base_vertex: u32 = 0,
 };
 
 const TestPipelineFragmentInput = struct {
@@ -50,25 +64,42 @@ fn testClusterShader(
     return null;
 }
 
+fn testVertexIndexShader(uniform: TestPipelineUniformInput, vertex_index: usize) usize {
+    const index = uniform.indices[uniform.base_vertex + vertex_index];
+
+    return index;
+}
+
+fn testVertexPositionShader(uniform: TestPipelineUniformInput, vertex_index: usize) @Vector(4, f32) {
+    _ = vertex_index;
+    _ = uniform;
+}
+
+fn testVertexInterpolatorShader(uniform: TestPipelineFragmentInput, vertex_index: f32, position: @Vector(4, f32)) TestPipelineFragmentInput {
+    _ = position;
+    _ = vertex_index;
+    _ = uniform;
+}
+
 fn testVertexShader(
     uniform: TestPipelineUniformInput,
     vertex_index: usize,
 ) struct { @Vector(4, f32), TestPipelineFragmentInput } {
     const index = uniform.indices[vertex_index];
-    const vertex = uniform.vertices[index];
+    const vertex = uniform.vertices[uniform.base_vertex + index];
 
     const world_space_position = uniform.transform.mulByVec4(.{ .data = .{ vertex.position[0], vertex.position[1], vertex.position[2], 1 } });
 
     const output: TestPipelineFragmentInput = .{
         .color = vertex.color,
-        .uv = vertex.uv,
+        .uv = .{ vertex.uv[0], vertex.uv[1] },
         .normal = vertex.normal,
         .position_world_space = .{ world_space_position.data[0], world_space_position.data[1], world_space_position.data[2] },
     };
 
     const position = uniform.view_projection.mulByVec4(world_space_position);
 
-    return .{ position.data, output };
+    return .{ .{ position.data[0], position.data[1], position.data[2], position.data[3] }, output };
 }
 
 fn testFragmentShader(
@@ -81,19 +112,37 @@ fn testFragmentShader(
 
     color *= input.color;
 
-    if (uniform.texture) |texture|
-        color *= texture.sample(input.uv).toNormalized();
+    if (uniform.texture) |texture| {
+        color *= texture.sampleBilinear(input.uv, .point, .black).toNormalized();
+        // color *= texture.sample(input.uv, .point, .black).toNormalized();
+    }
 
-    const light_pos = @Vector(3, f32){ 0, 2, 0 };
-    const light_dir = zalgebra.Vec3.norm(.{ .data = light_pos - input.position_world_space }).data;
+    const enable_lighting = false;
 
-    const distance_to_light = zalgebra.Vec3.distance(.{ .data = light_pos }, .{input.position_world_space});
+    if (enable_lighting) {
+        var light_contribution: @Vector(3, f32) = .{ 0.1, 0.1, 0.1 };
 
-    const attentuation = 10 / @max(distance_to_light * distance_to_light, 0.01 * 0.01);
+        for (uniform.lights) |light| {
+            const light_pos = light.position;
+            const light_dir = zalgebra.Vec3.norm(.{ .data = light_pos - input.position_world_space }).data;
+            const light_radius = 0.01;
 
-    const light_intensity = @max(zalgebra.Vec3.dot(.{ .data = input.normal }, .{ .data = light_dir }), 0);
+            const distance_to_light = zalgebra.Vec3.distance(.{ .data = light_pos }, .{input.position_world_space});
 
-    color *= @splat(light_intensity * attentuation);
+            const attentuation = 1 / @max(distance_to_light * distance_to_light, light_radius * light_radius);
+
+            const light_intensity = @max(zalgebra.Vec3.dot(.{ .data = input.normal }, .{ .data = light_dir }), 0);
+
+            light_contribution += light.color * @as(@Vector(3, f32), @splat(light_intensity * light.intensity * attentuation));
+        }
+
+        color *= @Vector(4, f32){ light_contribution[0], light_contribution[1], light_contribution[2], 1 };
+    }
+
+    // color[0] = input.uv[0];
+    // color[1] = input.uv[1];
+    // color[2] = 0;
+    // color[3] = 1;
 
     color[0] = std.math.clamp(color[0], 0, 1);
     color[1] = std.math.clamp(color[1], 0, 1);
@@ -118,6 +167,21 @@ pub const TestPipeline = Renderer.Pipeline(
 pub const Mesh = struct {
     vertices: []TestVertex,
     indices: []u32,
+    sub_meshes: []SubMesh,
+    textures: []Image = &.{},
+
+    pub const SubMesh = extern struct {
+        vertex_offset: u32,
+        vertex_count: u32,
+        index_offset: u32,
+        index_count: u32,
+        material_index: u32,
+        transform: [4][4]f32,
+        bounding_min: [3]f32,
+        bounding_max: [3]f32,
+
+        albedo_texture_index: u32,
+    };
 };
 
 pub fn loadMesh(allocator: std.mem.Allocator, file_path: []const u8) !Mesh {
@@ -157,6 +221,72 @@ pub fn loadMesh(allocator: std.mem.Allocator, file_path: []const u8) !Mesh {
         allocator.free(buffer_file_data);
     };
 
+    const texture_count = gltf.data.textures.items.len;
+
+    var textures = try std.ArrayList(Image).initCapacity(allocator, texture_count);
+    errdefer textures.deinit();
+
+    for (gltf.data.images.items) |image| {
+        if (image.uri == null) continue;
+
+        const path = image.uri.?;
+
+        std.log.info("file path: {s}", .{path});
+
+        const image_file = try file_directory.openFile(path, .{});
+        defer image_file.close();
+
+        const raw_data = try image_file.readToEndAlloc(allocator, std.math.maxInt(u64));
+        defer allocator.free(raw_data);
+
+        var texture_image_loaded = try zigimg.Image.fromMemory(allocator, raw_data);
+        defer texture_image_loaded.deinit();
+
+        var linear_data: []Image.Color = undefined;
+
+        switch (texture_image_loaded.pixels) {
+            .rgba32 => |data| {
+                linear_data = @as([*]Image.Color, @alignCast(@ptrCast(data)))[0..@as(usize, @intCast(texture_image_loaded.width * texture_image_loaded.height))];
+            },
+            .rgb24 => |data| {
+                linear_data = try allocator.alloc(Image.Color, texture_image_loaded.width * texture_image_loaded.height);
+
+                for (data, 0..) |pixel, i| {
+                    linear_data[i] = Image.Color{ .r = pixel.r, .g = pixel.g, .b = pixel.b, .a = 255 };
+                }
+            },
+            .grayscale1 => |data| {
+                linear_data = try allocator.alloc(Image.Color, texture_image_loaded.width * texture_image_loaded.height);
+
+                for (data, 0..) |pixel, i| {
+                    linear_data[i] = Image.Color{ .r = pixel.value, .g = pixel.value, .b = pixel.value, .a = 255 };
+                }
+            },
+            .grayscale8 => |data| {
+                linear_data = try allocator.alloc(Image.Color, texture_image_loaded.width * texture_image_loaded.height);
+
+                for (data, 0..) |pixel, i| {
+                    linear_data[i] = Image.Color{ .r = pixel.value, .g = pixel.value, .b = pixel.value, .a = 255 };
+                }
+            },
+            else => {
+                std.log.info("format: {s}", .{@tagName(texture_image_loaded.pixels)});
+
+                @panic("Format?");
+            },
+        }
+
+        var texture_image = try Image.initFromLinear(
+            allocator,
+            linear_data,
+            texture_image_loaded.width,
+            texture_image_loaded.height,
+        );
+        errdefer texture_image.deinit(allocator);
+
+        try textures.append(texture_image);
+    }
+
     var model_vertices = std.ArrayList(TestVertex).init(allocator);
     defer model_vertices.deinit();
 
@@ -165,6 +295,9 @@ pub fn loadMesh(allocator: std.mem.Allocator, file_path: []const u8) !Mesh {
 
     var model_indices = std.ArrayList(u32).init(allocator);
     defer model_indices.deinit();
+
+    var sub_meshes = std.ArrayList(Mesh.SubMesh).init(allocator);
+    errdefer sub_meshes.deinit();
 
     for (gltf.data.nodes.items) |node| {
         if (node.mesh == null) continue;
@@ -177,9 +310,10 @@ pub fn loadMesh(allocator: std.mem.Allocator, file_path: []const u8) !Mesh {
 
         for (mesh.primitives.items) |primitive| {
             const vertex_start = model_vertices.items.len;
-            _ = vertex_start;
             const index_start = model_indices.items.len;
-            _ = index_start;
+
+            var bounding_min: @Vector(3, f32) = .{ std.math.floatMax(f32), std.math.floatMax(f32), std.math.floatMax(f32) };
+            var bounding_max: @Vector(3, f32) = .{ std.math.floatMin(f32), std.math.floatMin(f32), std.math.floatMin(f32) };
 
             var vertex_count: usize = 0;
 
@@ -202,7 +336,7 @@ pub fn loadMesh(allocator: std.mem.Allocator, file_path: []const u8) !Mesh {
                         const buffer_view = gltf.data.buffer_views.items[accessor.buffer_view.?];
                         const buffer_data = buffer_file_datas[buffer_view.buffer];
 
-                        vertex_count = @as(usize, @intCast(accessor.count));
+                        vertex_count += @as(usize, @intCast(accessor.count));
 
                         try positions.ensureTotalCapacity(@as(usize, @intCast(accessor.count)));
 
@@ -289,6 +423,9 @@ pub fn loadMesh(allocator: std.mem.Allocator, file_path: []const u8) !Mesh {
                         .color = .{ 1, 1, 1, 1 },
                         .normal = normal,
                     });
+
+                    bounding_min = @min(bounding_min, position_vector);
+                    bounding_max = @max(bounding_max, position_vector);
                 }
             }
 
@@ -320,12 +457,61 @@ pub fn loadMesh(allocator: std.mem.Allocator, file_path: []const u8) !Mesh {
                     .float => unreachable,
                 }
             }
+
+            const has_material = primitive.material != null;
+
+            var material_index: u32 = 0;
+
+            //material
+            if (has_material) {
+                const material = gltf.data.materials.items[primitive.material.?];
+
+                const pbr = material.metallic_roughness;
+
+                const has_albedo_texture = pbr.base_color_texture != null;
+
+                const has_roughness_texture = pbr.metallic_roughness_texture != null;
+
+                var albedo_index: ?u32 = null;
+
+                if (has_albedo_texture) {
+                    const albedo_texture = gltf.data.textures.items[pbr.base_color_texture.?.index];
+
+                    albedo_index = @as(u32, @intCast(albedo_texture.source.?)) + 0;
+                }
+
+                var roughness_index: ?u32 = null;
+
+                if (has_roughness_texture) {
+                    const roughness_texture = gltf.data.textures.items[pbr.metallic_roughness_texture.?.index];
+
+                    roughness_index = @as(u32, @intCast(roughness_texture.source.?)) + 1;
+                }
+
+                material_index = albedo_index orelse 0;
+
+                std.log.info("Material {any}", .{pbr});
+            }
+
+            try sub_meshes.append(.{
+                .vertex_offset = @as(u32, @intCast(vertex_start)),
+                .vertex_count = @as(u32, @intCast(model_vertices.items.len - vertex_start)),
+                .index_offset = @as(u32, @intCast(index_start)),
+                .index_count = @as(u32, @intCast(model_indices.items.len - index_start)),
+                .material_index = material_index,
+                .transform = transform_matrix,
+                .bounding_min = bounding_min,
+                .bounding_max = bounding_max,
+                .albedo_texture_index = material_index,
+            });
         }
     }
 
     var mesh: Mesh = .{
         .vertices = try model_vertices.toOwnedSlice(),
         .indices = try model_indices.toOwnedSlice(),
+        .sub_meshes = try sub_meshes.toOwnedSlice(),
+        .textures = try textures.toOwnedSlice(),
     };
 
     return mesh;
@@ -334,8 +520,11 @@ pub fn loadMesh(allocator: std.mem.Allocator, file_path: []const u8) !Mesh {
 fn freeMesh(mesh: *Mesh, allocator: std.mem.Allocator) void {
     allocator.free(mesh.vertices);
     allocator.free(mesh.indices);
+    allocator.free(mesh.sub_meshes);
     mesh.* = undefined;
 }
+
+var previous_keyboard_state: ?[]const u8 = null;
 
 fn getKeyDown(key: c.SDL_Scancode) bool {
     var key_count: c_int = 0;
@@ -343,6 +532,19 @@ fn getKeyDown(key: c.SDL_Scancode) bool {
     const keys = c.SDL_GetKeyboardState(&key_count)[0..@intCast(key_count)];
 
     return keys[key] == 1;
+}
+
+///Returns true the first time the key is detected as down
+fn getKeyPressed(key: c.SDL_Scancode) bool {
+    var key_count: c_int = 0;
+
+    const keys = c.SDL_GetKeyboardState(&key_count)[0..@intCast(key_count)];
+
+    if (previous_keyboard_state == null) {
+        return keys[key] == 1;
+    }
+
+    return keys[key] == 1 and previous_keyboard_state.?[key] == 0;
 }
 
 const RasterUnit = @import("raster/RasterUnit.zig");
@@ -359,25 +561,22 @@ pub fn main() !void {
         return error.FailedToCreateWindow;
     }
 
+    defer if (previous_keyboard_state != null) {
+        allocator.free(previous_keyboard_state.?);
+    };
+
     const window_width = 640;
     const window_height = 480;
 
-    const surface_width = 640;
-    const surface_height = 480;
+    const surface_width = 1920 / 4;
+    const surface_height = 1080 / 4;
 
     var renderer: Renderer = undefined;
 
-    var raster_unit: RasterUnit = .{
-        .pipeline = undefined,
-        .uniform = undefined,
-        .render_pass = undefined,
-        .renderer = &renderer,
-    };
+    var raster_unit: RasterUnit = .{};
 
-    var command_buffer = CommandBuffer{
-        .allocator = allocator,
-    };
-    defer command_buffer.deinit();
+    try raster_unit.init(&renderer);
+    defer raster_unit.deinit();
 
     try renderer.init(allocator, window_width, window_height, surface_width, surface_height, "CentralGfx");
     defer renderer.deinit(allocator);
@@ -385,7 +584,8 @@ pub fn main() !void {
     var render_target = try Image.init(allocator, surface_width, surface_height);
     defer render_target.deinit(allocator);
 
-    const depth_target = try allocator.alloc(f32, surface_width * surface_height);
+    // const depth_target = try allocator.alloc(f32, surface_width * surface_height);
+    const depth_target = try allocator.alignedAlloc(f32, @alignOf(@Vector(8, f32)), surface_width * surface_height);
     defer allocator.free(depth_target);
 
     var cog_image_loaded = try zigimg.Image.fromMemory(allocator, cog_png);
@@ -395,14 +595,17 @@ pub fn main() !void {
 
     var cog_image = try Image.initFromLinear(
         allocator,
-        @as([*]Image.Color, @constCast(@ptrCast(cog_image_data)))[0..@as(usize, @intCast(cog_image_loaded.width * cog_image_loaded.height))],
+        @as([*]Image.Color, @constCast(@alignCast(@ptrCast(cog_image_data))))[0..@as(usize, @intCast(cog_image_loaded.width * cog_image_loaded.height))],
         cog_image_loaded.width,
         cog_image_loaded.height,
     );
     defer cog_image.deinit(allocator);
 
-    var mesh = try loadMesh(allocator, "src/res/suzanne/Suzanne.gltf");
+    var mesh = try loadMesh(allocator, "src/res/light_test.gltf");
     defer freeMesh(&mesh, allocator);
+
+    var shambler_mesh = try loadMesh(allocator, "src/res/shambler/scene.gltf");
+    defer freeMesh(&shambler_mesh, allocator);
 
     const enable_raster_pass = true;
     var enable_ray_pass = false;
@@ -483,18 +686,25 @@ pub fn main() !void {
     var last_mouse_x: f32 = 0;
     var last_mouse_y: f32 = 0;
 
-    var yaw: f32 = 233;
-    var pitch: f32 = -33.5;
+    var yaw: f32 = 420.7;
+    var pitch: f32 = -15.5;
     var roll: f32 = 0;
     _ = roll;
 
     var camera_enable: bool = false;
 
-    var camera_front: @Vector(3, f32) = .{ -0.5, -0.5, -0.5 };
-    var camera_target: @Vector(3, f32) = .{ 3.5, 4.5, 5.5 };
-    var camera_translation: @Vector(3, f32) = .{ 4, 5, -6 };
+    var camera_front: @Vector(3, f32) = .{ 0.46, -0.26, 0.84 };
+    var camera_target: @Vector(3, f32) = .{ -3.5, 2.17, -5.13 };
+    var camera_translation: @Vector(3, f32) = .{ -4, 2.4, -5.9 };
 
     var frame_time: f32 = 0.016;
+
+    var command_buffer = CommandBuffer{
+        .allocator = allocator,
+    };
+    defer command_buffer.deinit();
+
+    var test_pipeline = TestPipeline.runtime;
 
     while (!renderer.shouldWindowClose()) {
         const frame_start_time = std.time.microTimestamp();
@@ -608,7 +818,7 @@ pub fn main() !void {
 
                     if (camera_enable) {
                         const sensitivity = 0.1;
-                        var camera_speed: @Vector(3, f32) = @splat(30 * frame_time);
+                        var camera_speed: @Vector(3, f32) = @splat(10 * frame_time);
 
                         if (getKeyDown(c.SDL_SCANCODE_LCTRL)) {
                             camera_speed *= @splat(2);
@@ -647,7 +857,7 @@ pub fn main() !void {
                     camera_target = camera_translation + camera_front;
                 }
 
-                if (getKeyDown(c.SDL_SCANCODE_TAB)) {
+                if (getKeyPressed(c.SDL_SCANCODE_TAB)) {
                     camera_enable = !camera_enable;
 
                     c.SDL_SetWindowGrab(renderer.window, @intFromBool(camera_enable));
@@ -655,21 +865,26 @@ pub fn main() !void {
                     _ = c.SDL_SetRelativeMouseMode(@intFromBool(camera_enable));
                 }
 
-                var triangle_matrix: zalgebra.Mat4 = zalgebra.Mat4.fromTranslate(.{ .data = .{ 0, 0, 1 + @sin(time_s) * 4 * 0 } });
+                if (getKeyPressed(c.SDL_SCANCODE_L)) {
+                    test_pipeline.polygon_fill_mode = switch (test_pipeline.polygon_fill_mode) {
+                        .line => .fill,
+                        .fill => .line,
+                    };
+                }
 
-                triangle_matrix = triangle_matrix.mul(zalgebra.Mat4.fromEulerAngles(.{ .data = .{ 0, time_s * 180, 0 } }));
+                if (getKeyPressed(c.SDL_SCANCODE_F1)) {
+                    raster_unit.sort_triangles = !raster_unit.sort_triangles;
+                }
+
+                var triangle_matrix: zalgebra.Mat4 = zalgebra.Mat4.fromTranslate(.{ .data = .{ 0, 0, 1 + @sin(time_s) * 0 * 0 } });
+
+                triangle_matrix = triangle_matrix.mul(zalgebra.Mat4.fromEulerAngles(.{ .data = .{ 0, time_s * 0, 0 } }));
 
                 const view_matrix = zalgebra.Mat4.lookAt(
                     .{ .data = camera_translation },
                     .{ .data = camera_target },
                     .{ .data = .{ 0, 1, 0 } },
                 );
-
-                // const view_matrix = zalgebra.Mat4.lookAt(
-                //     .{ .data = camera_translation },
-                //     .{ .data = camera_target },
-                //     .{ .data = .{ 0, 1, 0 } },
-                // );
 
                 var window_size_x: c_int = 0;
                 var window_size_y: c_int = 0;
@@ -689,9 +904,7 @@ pub fn main() !void {
                     vertex.* = (vertex.* + @as(@Vector(3, f32), @splat(@as(f32, 1)))) / @as(@Vector(3, f32), @splat(@as(f32, 2)));
                 }
 
-                // renderer.drawTriangle(render_pass, triangle);
-
-                renderer.pipelineDrawTriangles(
+                if (false) renderer.pipelineDrawTriangles(
                     render_pass,
                     .{
                         .texture = cog_image,
@@ -717,43 +930,131 @@ pub fn main() !void {
                     TestPipeline,
                 );
 
-                for (0..0) |x| {
-                    for (0..2) |y| {
-                        renderer.pipelineDrawTriangles(
-                            render_pass,
-                            .{
-                                .texture = cog_image,
-                                .vertices = mesh.vertices,
-                                .indices = mesh.indices,
-                                .transform = zalgebra.Mat4.fromTranslate(.{ .data = .{ -5 + @as(f32, @floatFromInt(y)), 0, -5 + @as(f32, @floatFromInt(x)) } }),
-                                .view_projection = view_projection,
-                            },
-                            mesh.indices.len / 3,
-                            TestPipeline,
-                        );
-                    }
-                }
-
                 command_buffer.begin();
 
-                command_buffer.beginRasterPass(&render_pass);
+                command_buffer.beginRasterPass(&render_pass, .{
+                    .offset = .{ 0, 0 },
+                    .extent = .{ surface_width, surface_height },
+                }, .{
+                    .numerator = 1,
+                    .denominator = 1,
+                });
 
-                var mesh_uniforms: TestPipelineUniformInput = .{
+                command_buffer.setPipeline(&test_pipeline);
+                command_buffer.setScissor(.{
+                    // .offset = .{ surface_width / 4, surface_height / 4 },
+                    // .extent = .{ surface_width / 2, surface_height / 2 },
+                    .offset = .{ 0, 0 },
+                    .extent = .{ surface_width, surface_height },
+                });
+                command_buffer.setViewport(.{
+                    .x = 0,
+                    .y = @floatFromInt(surface_height),
+                    .width = @floatFromInt(surface_width),
+                    .height = -@as(f32, @floatFromInt(surface_height)),
+                    .depth_min = 0,
+                    .depth_max = 1,
+                });
+
+                var point_lights: [2]PointLight = undefined;
+
+                point_lights[0] = .{
+                    .color = .{ 1, 1, 1 },
+                    .position = .{ -3, @cos(time_s), 5 },
+                    .intensity = 30 + @fabs(@sin(time_s) * 20),
+                };
+
+                point_lights[1] = .{
+                    .color = .{ 1, 0.4, 0.1 },
+                    .position = .{ 3, @sin(time_s), -4 },
+                    .intensity = 20 + @fabs(@cos(time_s) * 30),
+                };
+
+                point_lights[1] = .{
+                    .color = .{ 1, 0.4, 0.1 },
+                    .position = .{ 3, 16, -4 },
+                    .intensity = 300 + @fabs(@cos(time_s) * 30),
+                };
+
+                var triangle_uniform: TestPipelineUniformInput = .{
                     .texture = cog_image,
-                    .vertices = mesh.vertices,
-                    .indices = mesh.indices,
-                    .transform = triangle_matrix,
+                    .vertices = &triangle_vertices,
+                    .indices = &.{ 0, 1, 2 },
+                    .transform = zalgebra.Mat4.fromTranslate(.{ .data = .{ 4, 1, 4 } }),
                     .view_projection = view_projection,
                 };
 
-                command_buffer.bindPipeline(&TestPipeline.runtime);
-                command_buffer.draw(&mesh_uniforms, @intCast(mesh.indices.len));
+                command_buffer.draw(&triangle_uniform, 0, 3);
+
+                var mesh_uniforms: [256]TestPipelineUniformInput = undefined;
+
+                for (mesh.sub_meshes[0..], 0..) |sub_mesh, i| {
+                    mesh_uniforms[i] = .{
+                        .texture = if (mesh.textures.len != 0) mesh.textures[sub_mesh.albedo_texture_index] else null,
+                        .vertices = mesh.vertices,
+                        .indices = mesh.indices,
+                        .transform = zalgebra.Mat4.identity(),
+                        .view_projection = zalgebra.Mat4.identity(),
+                    };
+
+                    mesh_uniforms[i].transform = zalgebra.Mat4.identity().rotate(
+                        time_s * 10,
+                        .{ .data = .{ 0, 1, 0 } },
+                    ).scale(
+                        .{ .data = .{ 0.1, 0.1, 0.1 } },
+                    );
+                    mesh_uniforms[i].view_projection = view_projection;
+                    mesh_uniforms[i].base_vertex = sub_mesh.vertex_offset;
+                    // mesh_uniforms[i].texture = mesh.textures[sub_mesh.albedo_texture_index];
+                    mesh_uniforms[i].lights = &point_lights;
+
+                    command_buffer.draw(
+                        &mesh_uniforms[i],
+                        sub_mesh.index_offset,
+                        sub_mesh.index_count,
+                    );
+                }
+
+                for (shambler_mesh.sub_meshes[0..], mesh.sub_meshes.len..) |sub_mesh, i| {
+                    mesh_uniforms[i] = .{
+                        .texture = shambler_mesh.textures[sub_mesh.albedo_texture_index],
+                        .vertices = shambler_mesh.vertices,
+                        .indices = shambler_mesh.indices,
+                        .transform = zalgebra.Mat4.identity(),
+                        .view_projection = zalgebra.Mat4.identity(),
+                    };
+
+                    mesh_uniforms[i].transform = zalgebra.Mat4.fromTranslate(.{ .data = .{ 30, 0, 50 } }).rotate(
+                        time_s * 10,
+                        .{ .data = .{ 0, 1, 0 } },
+                    ).scale(
+                        .{ .data = .{ 0.1, 0.1, 0.1 } },
+                    );
+                    mesh_uniforms[i].view_projection = view_projection;
+                    mesh_uniforms[i].base_vertex = sub_mesh.vertex_offset;
+                    mesh_uniforms[i].texture = shambler_mesh.textures[sub_mesh.albedo_texture_index];
+                    mesh_uniforms[i].lights = &point_lights;
+
+                    command_buffer.draw(
+                        &mesh_uniforms[i],
+                        sub_mesh.index_offset,
+                        sub_mesh.index_count,
+                    );
+                }
 
                 command_buffer.endRasterPass();
 
                 command_buffer.end();
 
-                @import("raster/command_processor.zig").submit(&raster_unit, &command_buffer);
+                var semaphore: std.Thread.Semaphore = .{ .permits = 1 };
+
+                @import("raster/command_processor.zig").submit(
+                    &raster_unit,
+                    &command_buffer,
+                    &semaphore,
+                );
+
+                semaphore.wait();
             }
 
             // if (enable_ray_pass) {
@@ -789,8 +1090,23 @@ pub fn main() !void {
         const frame_end_time = std.time.microTimestamp();
         const current_frame_time = frame_end_time - frame_start_time;
 
+        if ((@as(f32, @floatFromInt(current_frame_time)) / 1000) > 1000) {
+            // @panic("Render took too long!");
+        }
+
+        frame_time = (@as(f32, @floatFromInt(current_frame_time)) / (1000 * 1000));
+
         std.log.err("frame_time: {d:.2}ms", .{@as(f32, @floatFromInt(current_frame_time)) / 1000});
 
         renderer.presentImage(render_target);
+
+        {
+            var count: c_int = 0;
+            if (previous_keyboard_state != null) allocator.free(previous_keyboard_state.?);
+
+            previous_keyboard_state = c.SDL_GetKeyboardState(&count)[0..@intCast(count)];
+
+            previous_keyboard_state = try allocator.dupe(u8, previous_keyboard_state.?);
+        }
     }
 }

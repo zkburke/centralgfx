@@ -212,7 +212,28 @@ const ClippingPlane = struct {
     d: f32 = 0,
 };
 
-fn vectorDotGeneric3D(comptime N: comptime_int, comptime T: type, a: @Vector(N, T), b: @Vector(N, T)) T {
+fn matrixVectorProduct(
+    comptime N: comptime_int,
+    comptime T: type,
+    matrix: @Vector(N * N, T),
+    vector: @Vector(N, T),
+) @Vector(N, T) {
+    var result: @Vector(N, f32) = undefined;
+
+    inline for (0..N) |n| {
+        var dot_b: @Vector(N, T) = undefined;
+
+        inline for (0..N) |n_prime| {
+            dot_b[n_prime] = matrix[n * N + n_prime];
+        }
+
+        result[n] = vectorDotProduct(N, T, vector, dot_b);
+    }
+
+    return result;
+}
+
+fn vectorDotProduct(comptime N: comptime_int, comptime T: type, a: @Vector(N, T), b: @Vector(N, T)) T {
     return @reduce(.Add, a * b);
 }
 
@@ -444,7 +465,8 @@ fn interpolateVertex(
     // position[0] = position0[0] * (1 - t) + position1[0] * t;
 
     inline for (0..4) |n| {
-        position[n] = vectorDotGeneric3D(2, f32, .{ position0[n], position1[n] }, interpolant);
+        // position[n] = position0[n] * (1 - t) + position1[n] * t;
+        position[n] = vectorDotProduct(2, f32, .{ position0[n], position1[n] }, interpolant);
     }
 
     var interpolator: Interpolator = undefined;
@@ -454,7 +476,7 @@ fn interpolateVertex(
         const Component = std.meta.Child(field.type);
 
         for (0..vector_dimensions) |n| {
-            @field(interpolator, field.name)[n] = vectorDotGeneric3D(2, Component, .{
+            @field(interpolator, field.name)[n] = vectorDotProduct(2, Component, .{
                 @field(interpolator0, field.name)[n],
                 @field(interpolator1, field.name)[n],
             }, interpolant);
@@ -464,6 +486,105 @@ fn interpolateVertex(
     return .{
         .position = position,
         .interpolator = interpolator,
+    };
+}
+
+pub fn TriangleClipper(comptime Interpolator: type) type {
+    return struct {
+        index_in_buffer: [512]u8 = undefined,
+        index_out_buffer: [512]u8 = undefined,
+        vertex_position_buffer: [256]@Vector(4, f32) = undefined,
+        vertex_interpolator_buffer: [256]Interpolator = undefined,
+
+        indices_in: []u8,
+        indices_out: []u8,
+
+        vertex_positions: []@Vector(4, f32),
+        vertex_interpolators: []Interpolator,
+
+        pub fn init(
+            vertex_positions: []const @Vector(4, f32),
+            vertex_interpolators: []const Interpolator,
+            index1: u8,
+            index2: u8,
+            index3: u8,
+        ) @This() {
+            var self = @This(){
+                .indices_in = &.{},
+                .indices_out = &.{},
+                .vertex_positions = &.{},
+                .vertex_interpolators = &.{},
+            };
+
+            self.index_in_buffer[0] = index1;
+            self.index_in_buffer[1] = index2;
+            self.index_in_buffer[2] = index3;
+
+            self.indices_in = self.index_in_buffer[0..3];
+
+            @memcpy(self.vertex_position_buffer[0..vertex_positions.len], vertex_positions);
+            @memcpy(self.vertex_interpolator_buffer[0..vertex_interpolators.len], vertex_interpolators);
+
+            self.vertex_positions = self.vertex_position_buffer[0..vertex_positions.len];
+            self.vertex_interpolators = self.vertex_interpolator_buffer[0..vertex_interpolators.len];
+
+            return self;
+        }
+
+        pub fn clipToPlane(self: *@This(), plane: @Vector(4, f32)) void {
+            self.indices_out.ptr = &self.index_out_buffer;
+            self.indices_out.len = 0;
+
+            if (self.indices_in.len == 0) return;
+
+            var index_previous = self.indices_in[0];
+
+            self.indices_in.len += 1;
+            self.indices_in[self.indices_in.len - 1] = index_previous;
+
+            var previous_vertex_position = self.vertex_positions[index_previous];
+
+            var previous_dotp = vectorDotProduct(4, f32, plane, previous_vertex_position);
+
+            for (1..self.indices_in.len) |i| {
+                const index = self.indices_in[i];
+
+                const vertex_position = self.vertex_positions[index];
+
+                const dotp = vectorDotProduct(4, f32, plane, vertex_position);
+
+                if (previous_dotp >= 0) {
+                    self.indices_out.len += 1;
+                    self.indices_out[self.indices_out.len - 1] = index_previous;
+                }
+
+                if (std.math.sign(dotp) != std.math.sign(previous_dotp)) {
+                    const t = if (dotp < 0) previous_dotp / (previous_dotp - dotp) else -previous_dotp / (dotp - previous_dotp);
+
+                    const vertex_out = interpolateVertex(
+                        Interpolator,
+                        self.vertex_positions[index_previous],
+                        self.vertex_positions[index],
+                        self.vertex_interpolators[index_previous],
+                        self.vertex_interpolators[index],
+                        t,
+                    );
+
+                    self.vertex_positions.len += 1;
+                    self.vertex_positions[self.vertex_positions.len - 1] = vertex_out.position;
+                    self.vertex_interpolators.len += 1;
+                    self.vertex_interpolators[self.vertex_interpolators.len - 1] = vertex_out.interpolator;
+
+                    self.indices_out.len += 1;
+                    self.indices_out[self.indices_out.len - 1] = @intCast(self.vertex_positions.len - 1);
+                }
+
+                index_previous = index;
+                previous_dotp = dotp;
+            }
+
+            std.mem.swap([]u8, &self.indices_in, &self.indices_out);
+        }
     };
 }
 
@@ -520,7 +641,7 @@ fn clipTriangleToPlane(
         plane_c * previous_vertex_position[2] +
         plane_d * previous_vertex_position[3];
 
-    for (1..3) |i| {
+    for (1..4) |i| {
         const index: u8 = @intCast(i);
 
         const vertex_position = &vertex_positions_out[index];
@@ -610,12 +731,13 @@ fn clipTriangle(
     }
 
     var previous_index_count: usize = 3;
+    var index_offset: usize = 0;
 
     for (clipping_planes) |clipping_plane| {
         for (0..previous_index_count / 3) |triangle_index| {
-            const index_0 = indices_out[triangle_index * 3 + 0];
-            const index_1 = indices_out[triangle_index * 3 + 1];
-            const index_2 = indices_out[triangle_index * 3 + 2];
+            const index_0 = indices_out[index_offset + (triangle_index * 3 + 0)];
+            const index_1 = indices_out[index_offset + (triangle_index * 3 + 1)];
+            const index_2 = indices_out[index_offset + (triangle_index * 3 + 2)];
 
             const clip_result = clipTriangleToPlane(
                 Interpolator,
@@ -642,11 +764,16 @@ fn clipTriangle(
             for (0..clip_result.index_count) |i| {
                 const index = clip_result.indices_out[i];
 
-                vertex_positions_out[vertex_count + index] = clip_result.vertex_positions_out[index];
-                vertex_interpolators_out[vertex_count + index] = clip_result.vertex_interpolators_out[index];
+                vertex_positions_out[vertex_count] = clip_result.vertex_positions_out[index];
+                vertex_interpolators_out[vertex_count] = clip_result.vertex_interpolators_out[index];
+
+                indices_out[index_count] = @intCast(vertex_count);
+                index_count += 1;
 
                 vertex_count += 1;
             }
+
+            index_offset += 3;
         }
     }
 
@@ -697,20 +824,8 @@ fn pipelineDrawTriangle(
         fragment_input_2 = vertex_result_2[1];
     }
 
-    //Correct for upside down meshes
-    //TODO: use a 2x2 clip transform matrix
-    for (&triangle) |*point| {
-        point[1] = 1 - point[1];
-    }
-
-    const clip_volume_min = @Vector(4, f32){ -1, -1, 0, 0 };
-    const clip_volume_max = @Vector(4, f32){ 1, 1, 1, 1 };
-
-    for (&triangle) |*point| {
-        point[0] /= point[3];
-        point[1] /= point[3];
-        point[2] /= point[3];
-    }
+    const clip_volume_min = @Vector(4, f32){ -1, -1, 0, std.math.floatMin(f32) };
+    const clip_volume_max = @Vector(4, f32){ 1, 1, 1, std.math.floatMax(f32) };
 
     // Pre clip cull
     if ((@reduce(.And, triangle[0] > clip_volume_max) and
@@ -724,13 +839,13 @@ fn pipelineDrawTriangle(
     }
 
     const two_triangle_area = twoTriangleArea(.{
-        .{ triangle[0][0], triangle[0][1] },
-        .{ triangle[1][0], triangle[1][1] },
-        .{ triangle[2][0], triangle[2][1] },
+        .{ triangle[0][0] * (1 / triangle[0][3]), triangle[0][1] * (1 / triangle[0][3]) },
+        .{ triangle[1][0] * (1 / triangle[1][3]), triangle[1][1] * (1 / triangle[1][3]) },
+        .{ triangle[2][0] * (1 / triangle[2][3]), triangle[2][1] * (1 / triangle[2][3]) },
     });
 
     //backface and contribution cull
-    if (two_triangle_area >= 0) {
+    if (two_triangle_area <= 0) {
         return;
     }
 
@@ -742,7 +857,24 @@ fn pipelineDrawTriangle(
         @reduce(.And, triangle[1] >= clip_volume_min) and
         @reduce(.And, triangle[2] >= clip_volume_min)));
 
+    //2x2 transform matrix
+    const clip_transform: @Vector(2 * 2, f32) = .{
+        1, 0,
+        0, -1,
+    };
+
     if (entire_fit) {
+        for (&triangle) |*point| {
+            const inverse_w = 1 / point[3];
+            point[0] *= inverse_w;
+            point[1] *= inverse_w;
+            point[2] *= inverse_w;
+
+            const transformed = matrixVectorProduct(2, f32, clip_transform, .{ point[0], point[1] });
+
+            point.* = .{ transformed[0], transformed[1], point[2], point[3] };
+        }
+
         self.pipelineRasteriseTriangle(
             pipeline,
             pass,
@@ -758,36 +890,56 @@ fn pipelineDrawTriangle(
         return;
     }
 
-    const clip_result = clipTriangle(
-        pipeline.FragmentInput,
-        500,
-        500,
-        .{ triangle[0], triangle[1], triangle[2] },
-        .{ fragment_input_0, fragment_input_1, fragment_input_2 },
+    var clipper = TriangleClipper(pipeline.FragmentInput).init(
+        &triangle,
+        &.{ fragment_input_0, fragment_input_1, fragment_input_2 },
+        0,
+        1,
+        2,
     );
 
-    for (0..clip_result.index_count / 3) |clip_triangle_index| {
-        const index_0 = clip_result.indices_out[clip_triangle_index * 3];
-        const index_1 = clip_result.indices_out[clip_triangle_index * 3 + 1];
-        const index_2 = clip_result.indices_out[clip_triangle_index * 3 + 2];
+    const clipping_planes: [6]@Vector(4, f32) = .{
+        .{ -1, 0, 0, 1 },
+        .{ 1, 0, 0, 1 },
+        .{ 0, -1, 0, 1 },
+        .{ 0, 1, 0, 1 },
+        .{ 0, 0, -1, 1 },
+        .{ 0, 0, 1, 1 },
+    };
+
+    for (clipping_planes) |plane| {
+        clipper.clipToPlane(plane);
+    }
+
+    for (clipper.vertex_positions) |*point| {
+        const inverse_w = 1 / point[3];
+        point[0] *= inverse_w;
+        point[1] *= inverse_w;
+        point[2] *= inverse_w;
+
+        const transformed = matrixVectorProduct(2, f32, clip_transform, .{ point[0], point[1] });
+
+        point.* = .{ transformed[0], transformed[1], point[2], point[3] };
+    }
+
+    for (0..clipper.indices_out.len / 3) |clip_triangle_index| {
+        const index_0 = clipper.indices_out[clip_triangle_index * 3];
+        const index_1 = clipper.indices_out[clip_triangle_index * 3 + 1];
+        const index_2 = clipper.indices_out[clip_triangle_index * 3 + 2];
 
         self.pipelineRasteriseTriangle(
             pipeline,
             pass,
             uniform,
             .{
-                @min(@max(clip_result.vertex_positions_out[index_0], clip_volume_min), clip_volume_max),
-                @min(@max(clip_result.vertex_positions_out[index_1], clip_volume_min), clip_volume_max),
-                @min(@max(clip_result.vertex_positions_out[index_2], clip_volume_min), clip_volume_max),
-
-                // clip_result.vertex_positions_out[index_0],
-                // clip_result.vertex_positions_out[index_1],
-                // clip_result.vertex_positions_out[index_2],
+                clipper.vertex_positions[index_0],
+                clipper.vertex_positions[index_1],
+                clipper.vertex_positions[index_2],
             },
             .{
-                clip_result.vertex_interpolators_out[index_0],
-                clip_result.vertex_interpolators_out[index_1],
-                clip_result.vertex_interpolators_out[index_2],
+                clipper.vertex_interpolators[index_0],
+                clipper.vertex_interpolators[index_1],
+                clipper.vertex_interpolators[index_2],
             },
         );
     }
@@ -901,31 +1053,6 @@ fn pipelineRasteriseTriangle(
             const factor_step_0 = 1 / @as(f32, @floatFromInt(left_y_diff));
             const factor_step_1 = 1 / @as(f32, @floatFromInt(right_y_diff));
 
-            if (false) {
-                const tile_x: usize = @intCast(std.math.clamp(
-                    @as(isize, @intCast(@divFloor(left.p0[0], 4))),
-                    0,
-                    @as(isize, @intCast(render_pass.color_image.width / 4)),
-                ));
-                const tile_y: usize = @intCast(std.math.clamp(
-                    @as(isize, @intCast(@divFloor(left.p0[1], 4))),
-                    0,
-                    @as(isize, @intCast(render_pass.color_image.height / 4)),
-                ));
-
-                const tile_count_x: usize = @intCast(std.math.divCeil(usize, render_pass.color_image.width, 4) catch unreachable);
-                const tile_count_y: usize = @intCast(std.math.divCeil(isize, right_y_diff, 4) catch unreachable);
-
-                for (tile_y..tile_y + tile_count_y) |tile_y_rel| {
-                    const tile_begin_x = tile_x;
-                    const tile_begin_y = tile_y_rel;
-
-                    const tile_pointer = render_pass.color_image.texel_buffer.ptr + ((tile_begin_x + tile_begin_y * tile_count_x) * (4 * 4));
-
-                    @prefetch(tile_pointer, std.builtin.PrefetchOptions{ .rw = .write, .locality = 3 });
-                }
-            }
-
             var pixel_y: isize = @max(right.p0[1], 0);
 
             while (pixel_y < @min(right.p1[1], @as(isize, @intCast(render_pass.color_image.height)))) : (pixel_y += 1) {
@@ -971,19 +1098,17 @@ fn pipelineRasteriseTriangle(
 
             var pixel_x: isize = @max(span.x0, 0);
 
-            while (pixel_x < span.x1) : (pixel_x += 1) {
+            const pixel_increment: isize = switch (pipeline.polygon_fill_mode) {
+                .line => @max(@as(isize, @intCast(std.math.absCast(span.x1 - span.x0 - 1))), 1),
+                .fill => 1,
+            };
+
+            while (pixel_x < span.x1) : (pixel_x += pixel_increment) {
                 defer {
                     factor += factor_step;
                 }
 
-                defer switch (pipeline.polygon_fill_mode) {
-                    .line => {
-                        if (pixel_x == span.x0) {
-                            pixel_x = span.x1 - 1;
-                        }
-                    },
-                    .fill => {},
-                };
+                if (pixel_x < 0 or pixel_x >= render_pass.color_image.width) continue;
 
                 var point = @Vector(3, f32){
                     ((@as(f32, @floatFromInt(pixel_x)) / @as(f32, @floatFromInt(render_pass.color_image.width))) * 2) - 1,
@@ -1036,7 +1161,7 @@ fn pipelineRasteriseTriangle(
                             @field(triangle_attributes[2], field.name)[dimension],
                         };
 
-                        @field(fragment_input, field.name)[dimension] = vectorDotGeneric3D(3, Component, interpolator_lane, barycentrics);
+                        @field(fragment_input, field.name)[dimension] = vectorDotProduct(3, Component, interpolator_lane, barycentrics);
                     }
                 }
 
@@ -1080,13 +1205,13 @@ fn pipelineRasteriseTriangle(
     const screen_area = @fabs(vectorCross2D(points_2d[1] - points_2d[0], points_2d[2] - points_2d[0]));
     const inverse_screen_area = 1 / screen_area;
 
-    const p0_orig = @ceil((points[0] + @Vector(4, f32){ 1, 1, 1, 1 }) / @Vector(4, f32){ 2, 2, 2, 2 } * view_scale);
-    const p1_orig = @ceil((points[1] + @Vector(4, f32){ 1, 1, 1, 1 }) / @Vector(4, f32){ 2, 2, 2, 2 } * view_scale);
-    const p2_orig = @ceil((points[2] + @Vector(4, f32){ 1, 1, 1, 1 }) / @Vector(4, f32){ 2, 2, 2, 2 } * view_scale);
+    const p0_orig: @Vector(4, isize) = @intFromFloat(@ceil((points[0] + @Vector(4, f32){ 1, 1, 1, 1 }) / @Vector(4, f32){ 2, 2, 2, 2 } * view_scale));
+    const p1_orig: @Vector(4, isize) = @intFromFloat(@ceil((points[1] + @Vector(4, f32){ 1, 1, 1, 1 }) / @Vector(4, f32){ 2, 2, 2, 2 } * view_scale));
+    const p2_orig: @Vector(4, isize) = @intFromFloat(@ceil((points[2] + @Vector(4, f32){ 1, 1, 1, 1 }) / @Vector(4, f32){ 2, 2, 2, 2 } * view_scale));
 
-    const p0: @Vector(3, isize) = .{ @intFromFloat(p0_orig[0]), @intFromFloat(p0_orig[1]), @intFromFloat(p0_orig[2]) };
-    const p1: @Vector(3, isize) = .{ @intFromFloat(p1_orig[0]), @intFromFloat(p1_orig[1]), @intFromFloat(p1_orig[2]) };
-    const p2: @Vector(3, isize) = .{ @intFromFloat(p2_orig[0]), @intFromFloat(p2_orig[1]), @intFromFloat(p2_orig[2]) };
+    const p0: @Vector(3, isize) = .{ p0_orig[0], p0_orig[1], p0_orig[2] };
+    const p1: @Vector(3, isize) = .{ p1_orig[0], p1_orig[1], p1_orig[2] };
+    const p2: @Vector(3, isize) = .{ p2_orig[0], p2_orig[1], p2_orig[2] };
 
     const edges: [3]Edge = .{
         Edge.init(p0, p1, fragment_inputs[0], fragment_inputs[1]),

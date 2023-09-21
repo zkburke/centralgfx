@@ -4,6 +4,9 @@ pub fn build(b: *std.build.Builder) void {
     const target = b.standardTargetOptions(.{});
     const mode = b.standardOptimizeOption(.{});
 
+    const single_threaded = b.option(bool, "single-threaded", "Make the executable single threaded");
+    _ = single_threaded;
+
     const exe = b.addExecutable(.{
         .name = "centralgfx",
         .target = target,
@@ -24,6 +27,8 @@ pub fn build(b: *std.build.Builder) void {
         .source_file = std.build.LazyPath.relative("lib/zgltf/src/main.zig"),
     });
 
+    exe.single_threaded = true;
+
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -37,7 +42,7 @@ pub fn build(b: *std.build.Builder) void {
     run_step.dependOn(&run_cmd.step);
 
     const exe_tests = b.addTest(.{
-        .root_source_file = std.build.FileSource.relative("lib/stb_image.zig"),
+        .root_source_file = std.build.FileSource.relative("src/main.zig"),
         .target = target,
         .optimize = mode,
     });
