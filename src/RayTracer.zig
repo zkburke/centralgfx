@@ -60,7 +60,7 @@ inline fn reflect(v: @Vector(3, f32), n: @Vector(3, f32)) @Vector(3, f32) {
 inline fn refract(uvw: @Vector(3, f32), n: @Vector(3, f32), etai_over_etat: f32) @Vector(3, f32) {
     const cos_theta = @min(dot(-uvw, n), 1);
     const r_out_perp = @as(@Vector(3, f32), @splat(etai_over_etat)) * (uvw + @as(@Vector(3, f32), @splat(cos_theta)) * n);
-    const r_out_parallel = -@as(@Vector(3, f32), @splat(@sqrt(@fabs(1 - dot(r_out_perp, r_out_perp))))) * n;
+    const r_out_parallel = -@as(@Vector(3, f32), @splat(@sqrt(@abs(1 - dot(r_out_perp, r_out_perp))))) * n;
 
     return r_out_perp + r_out_parallel;
 }
@@ -85,7 +85,7 @@ pub const Plane = struct {
     pub inline fn intersect(plane: Plane, ray_begin: @Vector(3, f32), ray_end: @Vector(3, f32)) f32 {
         const denom = dot(plane.normal, ray_end);
 
-        if (@fabs(denom) <= 1e-4) //prevent div by 0
+        if (@abs(denom) <= 1e-4) //prevent div by 0
         {
             return -1;
         }

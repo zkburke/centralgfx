@@ -37,6 +37,12 @@ triangle_layout: struct {
     flat_count: u8 = 0,
 } = .{},
 
+cull_mode: CommandBuffer.FaceCullMode = .back,
+
+cull_xor: u8 = 0x00, //xor with cull internal status
+cull_and: u8 = 0xff, //and with cull internal status
+cull_or: u8 = 0x00, //or with cull internal status
+
 command_queue: struct {
     command_buffers: [256]*const CommandBuffer = undefined,
     submition_semaphores: [256]*std.Thread.Semaphore = undefined,

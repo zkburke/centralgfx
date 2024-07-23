@@ -4,6 +4,7 @@ pub const Command = union(enum) {
     set_pipeline: SetPipelineCommand,
     set_scissor: SetScissorCommand,
     set_viewport: SetViewportCommand,
+    set_face_cull_mode: SetFaceCullModeCommand,
     draw: DrawCommand,
 };
 
@@ -38,6 +39,10 @@ pub const SetViewportCommand = struct {
     },
 };
 
+pub const SetFaceCullModeCommand = struct {
+    mode: FaceCullMode,
+};
+
 pub const DrawCommand = struct {
     uniform: *const anyopaque,
     vertex_offset: u32,
@@ -48,6 +53,18 @@ pub const Status = enum(u8) {
     recording,
     pending,
     executing,
+};
+
+pub const FaceCullMode = enum(u8) {
+    none = 0,
+    back = 1,
+    front = 2,
+    front_and_back = 3,
+};
+
+pub const VertexWindingOrder = enum(u8) {
+    clockwise,
+    counter_clockwise,
 };
 
 allocator: std.mem.Allocator,
@@ -64,14 +81,14 @@ pub fn deinit(self: *CommandBuffer) void {
 
 ///Begin recording commands
 pub fn begin(self: *CommandBuffer) void {
-    @atomicStore(Status, &self.status, .recording, std.builtin.AtomicOrder.Unordered);
+    @atomicStore(Status, &self.status, .recording, std.builtin.AtomicOrder.unordered);
 
     self.commands.clearRetainingCapacity();
 }
 
 ///End recording commands
 pub fn end(self: *CommandBuffer) void {
-    @atomicStore(Status, &self.status, .pending, std.builtin.AtomicOrder.Unordered);
+    @atomicStore(Status, &self.status, .pending, std.builtin.AtomicOrder.unordered);
 }
 
 pub fn beginRasterPass(
@@ -153,6 +170,12 @@ pub fn setViewport(self: *CommandBuffer, viewport: struct {
             },
         },
     }) catch unreachable;
+}
+
+pub fn setFaceCullMode(self: *CommandBuffer, mode: FaceCullMode) void {
+    self.commands.append(self.allocator, .{ .set_face_cull_mode = .{
+        .mode = mode,
+    } }) catch unreachable;
 }
 
 pub fn draw(self: *CommandBuffer, uniform: *const anyopaque, vertex_offset: u32, vertex_count: u32) void {

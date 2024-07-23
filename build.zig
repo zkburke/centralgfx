@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub fn build(b: *std.build.Builder) void {
+pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const mode = b.standardOptimizeOption(.{});
 
@@ -11,23 +11,23 @@ pub fn build(b: *std.build.Builder) void {
         .name = "centralgfx",
         .target = target,
         .optimize = mode,
-        .root_source_file = std.build.LazyPath.relative("src/main.zig"),
+        .root_source_file = .{ .cwd_relative = "src/main.zig" },
     });
 
-    exe.addSystemIncludePath(std.build.LazyPath.relative("SDL2"));
+    exe.addSystemIncludePath(.{ .cwd_relative = "SDL2" });
     exe.linkSystemLibrary("SDL2");
     exe.linkLibC();
-    exe.addAnonymousModule("zigimg", .{
-        .source_file = std.build.LazyPath.relative("lib/zigimg/zigimg.zig"),
+    exe.root_module.addAnonymousImport("zigimg", .{
+        .root_source_file = .{ .cwd_relative = "lib/zigimg/zigimg.zig" },
     });
-    exe.addAnonymousModule("zalgebra", .{
-        .source_file = std.build.LazyPath.relative("lib/zalgebra/src/main.zig"),
+    exe.root_module.addAnonymousImport("zalgebra", .{
+        .root_source_file = .{ .cwd_relative = "lib/zalgebra/src/main.zig" },
     });
-    exe.addAnonymousModule("zgltf", .{
-        .source_file = std.build.LazyPath.relative("lib/zgltf/src/main.zig"),
+    exe.root_module.addAnonymousImport("zgltf", .{
+        .root_source_file = .{ .cwd_relative = "lib/zgltf/src/main.zig" },
     });
 
-    exe.single_threaded = true;
+    // exe.single_threaded = true;
 
     b.installArtifact(exe);
 
@@ -42,7 +42,7 @@ pub fn build(b: *std.build.Builder) void {
     run_step.dependOn(&run_cmd.step);
 
     const exe_tests = b.addTest(.{
-        .root_source_file = std.build.FileSource.relative("src/main.zig"),
+        .root_source_file = .{ .cwd_relative = "src/main.zig" },
         .target = target,
         .optimize = mode,
     });

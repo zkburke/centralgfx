@@ -86,7 +86,7 @@ fn pipelineDrawTriangle(
     vertex_offset: usize,
     triangle_index: usize,
 ) void {
-    @setFloatMode(.Optimized);
+    @setFloatMode(.optimized);
 
     var fragment_input_0: TestPipelineFragmentInput = undefined;
     var fragment_input_1: TestPipelineFragmentInput = undefined;
@@ -118,7 +118,15 @@ fn pipelineDrawTriangle(
         const eb = pb - pa;
         const ec = pc - pa;
 
-        const culled = eb[0] * ec[1] <= eb[1] * ec[0];
+        var culled = eb[0] * ec[1] <= eb[1] * ec[0];
+
+        //Could be done using bit manipulation instead of branching
+        switch (raster_unit.cull_mode) {
+            .none => culled = false,
+            .back => culled = culled,
+            .front => culled = !culled,
+            .front_and_back => culled = true,
+        }
 
         if (culled) {
             return;
@@ -323,7 +331,7 @@ pub fn TriangleClipper(comptime Interpolator: type) type {
             self.indices_in.len += 1;
             self.indices_in[self.indices_in.len - 1] = index_previous;
 
-            var previous_vertex_position = self.vertex_positions[index_previous];
+            const previous_vertex_position = self.vertex_positions[index_previous];
 
             var previous_dotp = vectorDotProduct(4, f32, plane, previous_vertex_position);
 
@@ -527,7 +535,7 @@ pub fn TriangleClipper(comptime Interpolator: type) type {
                         self.vertex_positions[next_index],
                         self.vertex_interpolators[current_index],
                         self.vertex_interpolators[next_index],
-                        @fabs(t),
+                        @abs(t),
                     );
 
                     if (keep) {

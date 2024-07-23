@@ -129,7 +129,7 @@ pub fn initFromLinear(
 
     for (0..height) |y| {
         for (0..width) |x| {
-            const pixel = image.texelFetch(.{ x, y });
+            const pixel = image.texelFetch(.{ .x = x, .y = y });
 
             pixel.* = image_pixels[x + y * width];
         }
@@ -187,7 +187,7 @@ pub fn sample(
 ) Color {
     _ = filter_mode;
     @setRuntimeSafety(false);
-    @setFloatMode(.Optimized);
+    @setFloatMode(std.builtin.FloatMode.optimized);
 
     const uv_0: @Vector(2, f32) = switch (border_mode) {
         .black => uv,
@@ -206,7 +206,7 @@ pub fn sample(
         return Color.fromNormalized(.{ 0, 0, 0, 0 });
     }
 
-    return self.texelFetch(.{ x, y }).*;
+    return self.texelFetch(.{ .x = x, .y = y }).*;
 }
 
 pub fn sampleBilinear(
@@ -250,8 +250,8 @@ pub fn sampleBilinear(
 
 pub fn texelFetchBorderUV(self: Image, uv_denorm: @Vector(2, f32)) Color {
     @setRuntimeSafety(false);
-    const x = @as(usize, @intFromFloat(@fabs(uv_denorm[0]))) % self.width;
-    const y = @as(usize, @intFromFloat(@fabs(uv_denorm[1]))) % self.height;
+    const x = @as(usize, @intFromFloat(@abs(uv_denorm[0]))) % self.width;
+    const y = @as(usize, @intFromFloat(@abs(uv_denorm[1]))) % self.height;
 
     if (x >= self.width or y >= self.height) {
         //border method

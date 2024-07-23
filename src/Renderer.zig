@@ -105,8 +105,8 @@ pub fn drawLine(self: Renderer, pass: Pass, a: @Vector(2, f32), b: @Vector(2, f3
 
     const b1 = target_p0[1] - gradient * target_p0[0];
 
-    var start: isize = 0;
-    var end = @as(isize, @intFromFloat(displacement[0]));
+    const start: isize = 0;
+    const end = @as(isize, @intFromFloat(displacement[0]));
 
     while (start < end) : (start += 1) {
         const x = @as(isize, @intFromFloat(target_p0[0])) + start;
@@ -249,7 +249,7 @@ fn planeLineIntersection(plane: ClippingPlane, line: [2]@Vector(4, f32)) @Vector
     const u = line[1] - line[0];
     const dot = vectorDot(plane.normal, .{ u[0], u[1], u[2] });
 
-    if (@fabs(dot) > 1e-6) {
+    if (@abs(dot) > 1e-6) {
         const w = line[0] - @as(@Vector(4, f32), @splat(plane.d));
         const frac = -vectorDot(plane.normal, .{ w[0], w[1], w[2] }) / dot;
 
@@ -406,7 +406,7 @@ inline fn calculateBarycentrics2DOptimized(
 
     const one_over_area = triangle_area_inverse;
 
-    const areas = @fabs(@Vector(3, f32){
+    const areas = @abs(@Vector(3, f32){
         pb[0] * cp[1],
         cp[0] * pa[1],
         0,
@@ -427,10 +427,10 @@ inline fn calculateBarycentrics2DOptimized(
 }
 
 fn calculateBarycentrics2D(triangle: [3]@Vector(2, f32), point: @Vector(2, f32)) @Vector(3, f32) {
-    const area_abc = @fabs(vectorCross2D(triangle[1] - triangle[0], triangle[2] - triangle[0]));
+    const area_abc = @abs(vectorCross2D(triangle[1] - triangle[0], triangle[2] - triangle[0]));
 
-    const area_pbc = @fabs(vectorCross2D(triangle[1] - point, triangle[2] - point));
-    const area_pca = @fabs(vectorCross2D(triangle[2] - point, triangle[0] - point));
+    const area_pbc = @abs(vectorCross2D(triangle[1] - point, triangle[2] - point));
+    const area_pca = @abs(vectorCross2D(triangle[2] - point, triangle[0] - point));
 
     const one_over_area = 1 / area_abc;
 
@@ -542,7 +542,7 @@ pub fn TriangleClipper(comptime Interpolator: type) type {
             self.indices_in.len += 1;
             self.indices_in[self.indices_in.len - 1] = index_previous;
 
-            var previous_vertex_position = self.vertex_positions[index_previous];
+            const previous_vertex_position = self.vertex_positions[index_previous];
 
             var previous_dotp = vectorDotProduct(4, f32, plane, previous_vertex_position);
 
@@ -1202,7 +1202,7 @@ fn pipelineRasteriseTriangle(
         .{ points[2][0], points[2][1] },
     };
 
-    const screen_area = @fabs(vectorCross2D(points_2d[1] - points_2d[0], points_2d[2] - points_2d[0]));
+    const screen_area = @abs(vectorCross2D(points_2d[1] - points_2d[0], points_2d[2] - points_2d[0]));
     const inverse_screen_area = 1 / screen_area;
 
     const p0_orig: @Vector(4, isize) = @intFromFloat(@ceil((points[0] + @Vector(4, f32){ 1, 1, 1, 1 }) / @Vector(4, f32){ 2, 2, 2, 2 } * view_scale));
@@ -1514,7 +1514,7 @@ pub fn drawTriangle(
             const factor_step_0 = 1 / @as(f32, @floatFromInt(left_y_diff));
             var factor1: f32 = 0;
             const factor_step_1 = 1 / @as(f32, @floatFromInt(right_y_diff));
-            var factor2: f32 = 0;
+            const factor2: f32 = 0;
             _ = factor2;
             const factor_step_2 = 1 / @as(f32, @floatFromInt(right_y_diff));
             _ = factor_step_2;
@@ -1618,7 +1618,7 @@ pub fn drawTriangle(
 pub fn presentImage(self: Renderer, image: Image) void {
     for (0..image.height) |y| {
         for (0..image.width) |x| {
-            self.swapchain_image[x + y * image.width] = image.texelFetch(.{ x, y }).*;
+            self.swapchain_image[x + y * image.width] = image.texelFetch(.{ .x = x, .y = y }).*;
         }
     }
 

@@ -1,3 +1,55 @@
+fn Fixed(comptime T: type, comptime integer_bits: comptime_int, fractional_bits: comptime_int) type {
+    _ = T;
+    const UnderlyingInteger = std.meta.Int(.Unsigned, integer_bits + fractional_bits);
+
+    return packed struct(UnderlyingInteger) {
+        bits: Int,
+
+        pub const Int = UnderlyingInteger;
+
+        pub const IntegerBits = std.meta.Int(.Signed, integer_bits);
+        pub const FractionalBits = std.meta.Int(.Unsigned, fractional_bits);
+
+        pub const Repr = packed struct(Int) {
+            int: IntegerBits,
+            fract: FractionalBits,
+        };
+
+        pub inline fn fromFloat(value: f32) void {
+            _ = value;
+        }
+
+        pub inline fn negate(a: @This()) @This() {
+            var repr: Repr = @bitCast(a);
+
+            repr.int = -repr.int;
+
+            return @bitCast(repr);
+        }
+
+        pub inline fn reciprocal(a: @This()) @This() {
+            _ = a;
+            //y = 1 / x
+        }
+
+        pub inline fn add(a: @This(), b: @This()) @This() {
+            return .{ .bits = a.bits + b.bits };
+        }
+
+        pub inline fn sub(a: @This(), b: @This()) @This() {
+            return .{ .bits = a.bits - b.bits };
+        }
+
+        pub inline fn mul(a: @This(), b: @This()) @This() {
+            return .{ .bits = a.bits * b.bits };
+        }
+
+        pub inline fn div(a: @This(), b: @This()) @This() {
+            return .{ .bits = a.bits / b.bits };
+        }
+    };
+}
+
 ///Draws a triangle using rasterisation, supplying a pipeline
 ///Of operation functions
 pub fn pipelineRasteriseTriangle(
@@ -5,46 +57,27 @@ pub fn pipelineRasteriseTriangle(
     points: [3]@Vector(4, f32),
     fragment_inputs: [3]geometry_processor.TestPipelineFragmentInput,
 ) void {
-    const Interpolators = geometry_processor.TestPipelineFragmentInput;
-
     const Edge = struct {
         p0: @Vector(3, isize),
         p1: @Vector(3, isize),
 
-        interpolators0: Interpolators,
-        interpolators1: Interpolators,
-
         pub fn init(
             p0: @Vector(3, isize),
             p1: @Vector(3, isize),
-            interpolators0: Interpolators,
-            interpolators1: Interpolators,
         ) @This() {
             if (p0[1] < p1[1]) {
                 return .{
                     .p0 = p0,
                     .p1 = p1,
-                    .interpolators0 = interpolators0,
-                    .interpolators1 = interpolators1,
                 };
             } else {
                 return .{
                     .p0 = p1,
                     .p1 = p0,
-                    .interpolators0 = interpolators1,
-                    .interpolators1 = interpolators0,
                 };
             }
         }
     };
-
-    const view_scale = @Vector(4, f32){
-        @as(f32, @floatFromInt(raster_unit.render_pass.color_image.width)),
-        @as(f32, @floatFromInt(raster_unit.render_pass.color_image.height)),
-        1,
-        1,
-    };
-    _ = view_scale;
 
     const points_2d: [3]@Vector(2, f32) = .{
         .{ points[0][0], points[0][1] },
@@ -52,33 +85,21 @@ pub fn pipelineRasteriseTriangle(
         .{ points[2][0], points[2][1] },
     };
 
-    const screen_area = @fabs(vectorCross2D(points_2d[1] - points_2d[0], points_2d[2] - points_2d[0]));
+    const screen_area = @abs(vectorCross2D(points_2d[1] - points_2d[0], points_2d[2] - points_2d[0]));
     const inverse_screen_area = 1 / screen_area;
-
-    // const p0_orig = @ceil((points[0] + @Vector(4, f32){ 1, 1, 1, 1 }) / @Vector(4, f32){ 2, 2, 2, 2 } * view_scale);
-    // const p1_orig = @ceil((points[1] + @Vector(4, f32){ 1, 1, 1, 1 }) / @Vector(4, f32){ 2, 2, 2, 2 } * view_scale);
-    // const p2_orig = @ceil((points[2] + @Vector(4, f32){ 1, 1, 1, 1 }) / @Vector(4, f32){ 2, 2, 2, 2 } * view_scale);
 
     const p0_orig = @ceil(points[0]);
     const p1_orig = @ceil(points[1]);
     const p2_orig = @ceil(points[2]);
-
-    //std.log.info("points[0] = {}", .{points[0]});
-    //std.log.info("points[1] = {}", .{points[1]});
-    //std.log.info("points[2] = {}", .{points[2]});
-
-    //std.log.info("p0_orig = {}", .{p0_orig});
-    //std.log.info("p1_orig = {}", .{p1_orig});
-    //std.log.info("p2_orig = {}", .{p2_orig});
 
     const p0: @Vector(3, isize) = .{ @intFromFloat(p0_orig[0]), @intFromFloat(p0_orig[1]), @intFromFloat(p0_orig[2]) };
     const p1: @Vector(3, isize) = .{ @intFromFloat(p1_orig[0]), @intFromFloat(p1_orig[1]), @intFromFloat(p1_orig[2]) };
     const p2: @Vector(3, isize) = .{ @intFromFloat(p2_orig[0]), @intFromFloat(p2_orig[1]), @intFromFloat(p2_orig[2]) };
 
     const edges: [3]Edge = .{
-        Edge.init(p0, p1, fragment_inputs[0], fragment_inputs[1]),
-        Edge.init(p1, p2, fragment_inputs[1], fragment_inputs[2]),
-        Edge.init(p2, p0, fragment_inputs[2], fragment_inputs[0]),
+        Edge.init(p0, p1),
+        Edge.init(p1, p2),
+        Edge.init(p2, p0),
     };
 
     var max_length: isize = 0;
@@ -87,7 +108,7 @@ pub fn pipelineRasteriseTriangle(
     for (edges, 0..) |edge, i| {
         const length = edge.p1[1] - edge.p0[1];
         if (length > max_length) {
-            max_length = std.math.absInt(length) catch unreachable;
+            max_length = length;
             long_edge_index = i;
         }
     }
@@ -103,12 +124,9 @@ pub fn pipelineRasteriseTriangle(
         inverse_screen_area,
         edges[long_edge_index].p0,
         edges[long_edge_index].p1,
-        edges[long_edge_index].interpolators0,
-        edges[long_edge_index].interpolators1,
         edges[short_edge_1].p0,
         edges[short_edge_1].p1,
-        edges[short_edge_1].interpolators0,
-        edges[short_edge_1].interpolators1,
+        Image.Color{ .r = 255, .g = 0, .b = 0, .a = 255 },
     );
     drawEdges(
         raster_unit,
@@ -118,12 +136,9 @@ pub fn pipelineRasteriseTriangle(
         inverse_screen_area,
         edges[long_edge_index].p0,
         edges[long_edge_index].p1,
-        edges[long_edge_index].interpolators0,
-        edges[long_edge_index].interpolators1,
         edges[short_edge_2].p0,
         edges[short_edge_2].p1,
-        edges[short_edge_2].interpolators0,
-        edges[short_edge_2].interpolators1,
+        Image.Color{ .r = 0, .g = 255, .b = 0, .a = 255 },
     );
 }
 
@@ -135,18 +150,11 @@ inline fn drawEdges(
     inverse_screen_area: f32,
     left_p0: @Vector(3, isize),
     left_p1: @Vector(3, isize),
-    left_interpolators0: geometry_processor.TestPipelineFragmentInput,
-    left_interpolators1: geometry_processor.TestPipelineFragmentInput,
     right_p0: @Vector(3, isize),
     right_p1: @Vector(3, isize),
-    right_interpolators0: geometry_processor.TestPipelineFragmentInput,
-    right_interpolators1: geometry_processor.TestPipelineFragmentInput,
+    color: Image.Color,
 ) void {
-    _ = right_interpolators1;
-    _ = right_interpolators0;
-    _ = left_interpolators1;
-    _ = left_interpolators0;
-    const x_diff: u64 = std.math.absCast(right_p1[0] - right_p0[0]) + std.math.absCast(left_p1[0] - left_p0[0]);
+    const x_diff: u64 = @abs(right_p1[0] - right_p0[0]) + @abs(left_p1[0] - left_p0[0]);
 
     if (x_diff == 0) return;
 
@@ -172,37 +180,61 @@ inline fn drawEdges(
     var skip_step: f32 = 0;
 
     if (right_p0[1] < raster_unit.scissor.offset[1]) {
-        skip_step = @fabs(@as(f32, @floatFromInt(raster_unit.scissor.offset[1] - right_p0[1])));
+        skip_step = @abs(@as(f32, @floatFromInt(raster_unit.scissor.offset[1] - right_p0[1])));
     }
 
     factor0 = @mulAdd(f32, factor_step_0, skip_step, factor0);
     factor1 = @mulAdd(f32, factor_step_1, skip_step, factor1);
 
+    const sub_pixels = 16;
+
+    var x0_fixed: isize = left_p0[0] * sub_pixels;
+    var x1_fixed: isize = right_p0[0] * sub_pixels;
+
+    // if (right_p0[1] - left_p0[1] == 0) return;
+
+    const x0_increment: isize = @divFloor(left_x_diff * sub_pixels, left_y_diff);
+    const x1_increment: isize = @divFloor(right_x_diff * sub_pixels, right_y_diff);
+    // const x0_increment: isize = @divFloor(left_x_diff * sub_pixels, left_y_diff * (right_p0[1] - left_p0[1]));
+
+    const skip_step_fixed: isize = @max(raster_unit.scissor.offset[1] - right_p0[1], 0);
+
+    x0_fixed += x0_increment * skip_step_fixed;
+    x1_fixed += x1_increment * skip_step_fixed;
+
+    x0_fixed += x0_increment * (right_p0[1] - left_p0[1]);
+
     while (pixel_y < @min(right_p1[1], raster_unit.scissor.extent[1])) : (pixel_y += 1) {
         defer {
             factor0 += factor_step_0;
             factor1 += factor_step_1;
+
+            x0_fixed += x0_increment;
+            x1_fixed += x1_increment;
         }
 
-        //start and end of the span
-        var x0 = left_p0[0] + @as(isize, @intFromFloat(@ceil(@as(f32, @floatFromInt(left_x_diff)) * factor0)));
-        var x1 = right_p0[0] + @as(isize, @intFromFloat(@ceil(@as(f32, @floatFromInt(right_x_diff)) * factor1)));
+        const x0 = left_p0[0] + @as(isize, @intFromFloat(@ceil(@as(f32, @floatFromInt(left_x_diff)) * factor0)));
+        const x1 = right_p0[0] + @as(isize, @intFromFloat(@ceil(@as(f32, @floatFromInt(right_x_diff)) * factor1)));
 
-        if (x1 < x0) {
-            std.mem.swap(isize, &x0, &x1);
-        }
+        // const x0: isize = @divTrunc(x0_fixed, 16);
+        // const x1: isize = @divTrunc(x1_fixed, 16);
+
+        // const x0: isize = x0_fixed >> 4;
+        // const x1: isize = x1_fixed >> 4;
+
+        const x_min = @min(x0, x1);
+        const x_max = @max(x0, x1);
 
         drawSpan(
             raster_unit,
-            x0,
-            x1,
-            undefined,
-            undefined,
+            x_min,
+            x_max,
             triangle,
             triangle_attributes,
             screen_area,
             inverse_screen_area,
             pixel_y,
+            color,
         );
     }
 }
@@ -211,16 +243,14 @@ inline fn drawSpan(
     raster_unit: *RasterUnit,
     x0: isize,
     x1: isize,
-    interpolators0: geometry_processor.TestPipelineFragmentInput,
-    interpolators1: geometry_processor.TestPipelineFragmentInput,
     triangle: [3]@Vector(4, f32),
     triangle_attributes: [3]geometry_processor.TestPipelineFragmentInput,
     screen_area: f32,
     inverse_screen_area: f32,
     pixel_y: isize,
+    color: Image.Color,
 ) void {
-    _ = interpolators1;
-    _ = interpolators0;
+    _ = color;
     _ = screen_area;
 
     const reciprocal_w = simd.reciprocalVec3(.{
@@ -229,25 +259,15 @@ inline fn drawSpan(
         triangle[2][3],
     });
 
-    const xdiff = x1 - x0;
-
-    const factor_step = 1 / @as(f32, @floatFromInt(xdiff));
-
-    var factor: f32 = 0;
-
     const pixel_increment: isize = switch (raster_unit.pipeline.polygon_fill_mode) {
-        .line => @max(@as(isize, @intCast(std.math.absCast(x1 - x0 - 1))), 1),
+        .line => @max(@as(isize, @intCast(@abs(x1 - x0 - 1))), 1),
         .fill => 1,
     };
 
     var pixel_x: isize = @max(x0, raster_unit.scissor.offset[0]);
 
     while (pixel_x < @min(x1, raster_unit.scissor.extent[0])) : (pixel_x += pixel_increment) {
-        defer {
-            factor += factor_step;
-        }
-
-        var point = @Vector(2, f32){
+        const point = @Vector(2, f32){
             @floatFromInt(pixel_x),
             @floatFromInt(pixel_y),
         };
@@ -308,7 +328,7 @@ inline fn drawSpan(
             }
         }
 
-        const pixel = raster_unit.render_pass.color_image.texelFetch(.{ @intCast(pixel_x), @intCast(pixel_y) });
+        const pixel = raster_unit.render_pass.color_image.texelFetch(.{ .x = @intCast(pixel_x), .y = @intCast(pixel_y) });
 
         var fragment_color: @Vector(4, f32) = undefined;
 
@@ -321,6 +341,7 @@ inline fn drawSpan(
 
         // pixel.* = Image.Color.fromNormalized(.{ previous_color[0] + 0.1, 0, 0, 1 });
         pixel.* = Image.Color.fromNormalized(fragment_color);
+        // pixel.* = color;
     }
 }
 
@@ -420,8 +441,8 @@ fn drawSpanExperimental(
 
             const one_over_area = inverse_screen_area;
 
-            const areas_x = @fabs(pb_x * cp_y - cp_x * pb_y);
-            const areas_y = @fabs(cp_x * pa_y - pa_x * cp_y);
+            const areas_x = @abs(pb_x * cp_y - cp_x * pb_y);
+            const areas_y = @abs(cp_x * pa_y - pa_x * cp_y);
 
             barycentric_x = areas_x * @as(@Vector(warp_size, f32), @splat(one_over_area));
             barycentric_y = areas_y * @as(@Vector(warp_size, f32), @splat(one_over_area));
@@ -561,8 +582,8 @@ fn drawSpanExperimental(
             v = @mulAdd(@Vector(warp_size, f32), vb, barycentric_y, v);
             v = @mulAdd(@Vector(warp_size, f32), vc, barycentric_z, v);
 
-            u = @min(@fabs(u), @as(@Vector(warp_size, f32), @splat(1)));
-            v = @min(@fabs(v), @as(@Vector(warp_size, f32), @splat(1)));
+            u = @min(@abs(u), @as(@Vector(warp_size, f32), @splat(1)));
+            v = @min(@abs(v), @as(@Vector(warp_size, f32), @splat(1)));
 
             const ra = @as(@Vector(warp_size, f32), @splat(triangle_attributes[0].color[0]));
             const rb = @as(@Vector(warp_size, f32), @splat(triangle_attributes[1].color[0]));
@@ -609,7 +630,7 @@ fn drawSpanExperimental(
 
         const depth_out = @select(f32, fragment_write_mask, point_z, previous_z);
 
-        var fragments = packUnorm4xf32(a, b, g, r);
+        const fragments = packUnorm4xf32(a, b, g, r);
 
         inline for (0..warp_size) |pixel_index| {
             const pixel_out_start: [*]Image.Color = @ptrCast(raster_unit.render_pass.color_image.texelFetch(.{
@@ -654,7 +675,7 @@ inline fn calculateBarycentrics2DOptimized(
 
     const one_over_area = triangle_area_inverse;
 
-    const areas = @fabs(@Vector(3, f32){
+    const areas = @abs(@Vector(3, f32){
         pb[0] * cp[1],
         cp[0] * pa[1],
         0,

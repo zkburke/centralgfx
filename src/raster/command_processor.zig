@@ -12,8 +12,8 @@ pub fn init(raster_unit: *RasterUnit) void {
                 &raster_unit.command_queue.next_entry_to_read,
                 new_entry_to_read,
                 original_next_entry_to_read,
-                std.builtin.AtomicOrder.Acquire,
-                std.builtin.AtomicOrder.Acquire,
+                std.builtin.AtomicOrder.acquire,
+                std.builtin.AtomicOrder.acquire,
             );
 
             if (index == original_next_entry_to_read) {
@@ -27,7 +27,7 @@ pub fn init(raster_unit: *RasterUnit) void {
                     &raster_unit.command_queue.completion_count,
                     .Add,
                     1,
-                    std.builtin.AtomicOrder.Acquire,
+                    std.builtin.AtomicOrder.acquire,
                 );
             }
         } else {
@@ -70,6 +70,9 @@ fn executeWorkload(
 
                 raster_unit.depth_min = set_viewport.viewport.depth_min;
                 raster_unit.depth_max = set_viewport.viewport.depth_max;
+            },
+            .set_face_cull_mode => |set_face_cull_mode| {
+                raster_unit.cull_mode = set_face_cull_mode.mode;
             },
             .draw => |draw| {
                 raster_unit.uniform = draw.uniform;
@@ -115,9 +118,9 @@ pub fn submit(
     command_buffer: *CommandBuffer,
     render_finished: *std.Thread.Semaphore,
 ) void {
-    @atomicStore(CommandBuffer.Status, &command_buffer.status, .executing, std.builtin.AtomicOrder.Unordered);
+    @atomicStore(CommandBuffer.Status, &command_buffer.status, .executing, std.builtin.AtomicOrder.unordered);
 
-    if (!@import("builtin").single_threaded) {
+    if (!true) {
         const new_next_entry_to_write: u32 = @intCast((raster_unit.command_queue.next_entry_to_write + 1) % raster_unit.command_queue.command_buffers.len);
 
         std.debug.assert(new_next_entry_to_write != raster_unit.command_queue.next_entry_to_read);
@@ -134,7 +137,7 @@ pub fn submit(
         raster_unit.command_queue.semaphore.post();
     }
 
-    if (@import("builtin").single_threaded) {
+    if (true) {
         executeWorkload(raster_unit, command_buffer, render_finished);
     }
 }

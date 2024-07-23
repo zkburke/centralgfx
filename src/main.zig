@@ -42,6 +42,14 @@ pub const TestPipelineUniformInput = struct {
         },
     },
     transform: zalgebra.Mat4,
+    transform_geo: struct {
+        ///Vector
+        position: @Vector(3, f32) = .{ 0, 0, 0 },
+        ///Bivector
+        scale: @Vector(3, f32) = .{ 1, 1, 1 },
+        ///scalar + Bivector (Rotor)
+        rotor: @Vector(4, f32) = .{ 1, 0, 0, 0 },
+    },
     view_projection: zalgebra.Mat4,
     base_vertex: u32 = 0,
 };
@@ -81,6 +89,85 @@ fn testVertexInterpolatorShader(uniform: TestPipelineFragmentInput, vertex_index
     _ = uniform;
 }
 
+fn vectorDotProduct(a: @Vector(3, f32), b: @Vector(3, f32)) f32 {
+    return a[0] * b[0] + a[1] * b[1];
+}
+
+///Wedge product
+fn vectorWedge(a: @Vector(3, f32), b: @Vector(3, f32)) @Vector(3, f32) {
+    return .{
+        a[0] * b[1] - a[1] * b[0],
+        a[0] * b[2] - a[2] * b[0],
+        a[1] * b[2] - a[2] * b[1],
+    };
+}
+
+//R = a + xe0 + ye1 + ze2
+const Rotor = struct {
+    a: f32,
+    b01: f32,
+    b02: f32,
+    b12: f32,
+
+    pub fn fromVectors(v0: @Vector(3, f32), v1: @Vector(3, f32)) Rotor {
+        const a = 1 + vectorDotProduct(v0, v1);
+
+        const minusb = vectorWedge(v1, v0);
+
+        return .{
+            .a = a,
+            .b01 = minusb[0],
+            .b02 = minusb[1],
+            .b12 = minusb[2],
+        };
+    }
+
+    pub fn productRotor(p: Rotor, q: Rotor) Rotor {
+        var r: Rotor = .{
+            .a = 0,
+            .b01 = 0,
+            .b02 = 0,
+            .b12 = 0,
+        };
+
+        r.a = p.a * q.a - p.b01 * q.b01 - p.b02 * q.b02 - p.b12 * q.b12;
+        r.b01 = p.b01 * q.a + p.a * q.b01 + p.b12 * q.b02 - p.b02 * q.b12;
+        r.b02 = p.b02 * q.a + p.a * q.b02 - p.b12 * q.b01 + p.b01 * q.b12;
+        r.b12 = p.b12 * q.a + p.a * q.b12 + p.b02 * q.b01 - p.b01 * q.b02;
+    }
+
+    pub fn rotateVector(p: Rotor, v: @Vector(3, f32)) @Vector(3, f32) {
+        const q = @Vector(3, f32){
+            p.a * v[0] + v[1] * p.b01 + v[2] * p.b02,
+            p.a * v[1] - v[0] * p.b01 + v[2] * p.b12,
+            p.a * v[2] - v[0] * p.b02 - v[1] * p.b12,
+        };
+
+        const q012 = v[0] * p.b12 - v[1] * p.b02 + v[2] * p.b01;
+
+        const r = @Vector(3, f32){
+            p.a * q[0] + q[1] * p.b01 + q[2] * p.b02 + q012 * p.b12,
+            p.a * q[1] - q[0] * p.b01 - q012 * p.b02 + q[2] * p.b12,
+            p.a * q[2] + q012 * p.b01 - q[0] * p.b02 - q[1] * p.b12,
+        };
+
+        return r;
+    }
+
+    pub fn rotateRotor(p: Rotor, q: Rotor) Rotor {
+        return p.productRotor(q).productRotor(p.reverse());
+    }
+
+    pub fn reverse(self: Rotor) Rotor {
+        return .{
+            .a = self.a,
+            .b01 = -self.b01,
+            .b02 = -self.b02,
+            .b12 = -self.b12,
+        };
+    }
+};
+
 fn testVertexShader(
     uniform: TestPipelineUniformInput,
     vertex_index: usize,
@@ -88,10 +175,39 @@ fn testVertexShader(
     const index = uniform.indices[vertex_index];
     const vertex = uniform.vertices[uniform.base_vertex + index];
 
-    const world_space_position = uniform.transform.mulByVec4(.{ .data = .{ vertex.position[0], vertex.position[1], vertex.position[2], 1 } });
+    const use_geo = false;
+
+    var world_space_position = uniform.transform.mulByVec4(.{ .data = .{ vertex.position[0], vertex.position[1], vertex.position[2], 1 } });
+
+    if (use_geo) {
+        const rotated_vertex = Rotor.rotateVector(.{
+            .a = uniform.transform_geo.rotor[0],
+            .b01 = uniform.transform_geo.rotor[1],
+            .b02 = uniform.transform_geo.rotor[2],
+            .b12 = uniform.transform_geo.rotor[3],
+        }, vertex.position);
+
+        const world_space_position_v3 = uniform.transform_geo.position + rotated_vertex * uniform.transform_geo.scale;
+
+        world_space_position.data = .{
+            world_space_position_v3[0],
+            world_space_position_v3[1],
+            world_space_position_v3[2],
+            1,
+        };
+    }
+
+    var triangle_color: f32 = @floatFromInt(vertex_index / 3);
+
+    triangle_color /= @floatFromInt((uniform.indices.len / 3) * 2);
+
+    var color: @Vector(4, f32) = @splat(1);
+
+    color[(vertex_index / 3) % 3] = triangle_color;
+    color[(vertex_index / 3 + 1) % 3] = triangle_color + 0.25;
 
     const output: TestPipelineFragmentInput = .{
-        .color = vertex.color,
+        .color = color,
         .uv = .{ vertex.uv[0], vertex.uv[1] },
         .normal = vertex.normal,
         .position_world_space = .{ world_space_position.data[0], world_space_position.data[1], world_space_position.data[2] },
@@ -110,11 +226,11 @@ fn testFragmentShader(
     _ = position;
     var color: @Vector(4, f32) = .{ 1, 1, 1, 1 };
 
-    color *= input.color;
+    // color *= input.color;
 
     if (uniform.texture) |texture| {
-        color *= texture.sampleBilinear(input.uv, .point, .black).toNormalized();
-        // color *= texture.sample(input.uv, .point, .black).toNormalized();
+        // color *= texture.sampleBilinear(input.uv, .point, .black).toNormalized();
+        color *= texture.sample(input.uv, .point, .black).toNormalized();
     }
 
     const enable_lighting = false;
@@ -507,7 +623,7 @@ pub fn loadMesh(allocator: std.mem.Allocator, file_path: []const u8) !Mesh {
         }
     }
 
-    var mesh: Mesh = .{
+    const mesh: Mesh = .{
         .vertices = try model_vertices.toOwnedSlice(),
         .indices = try model_indices.toOwnedSlice(),
         .sub_meshes = try sub_meshes.toOwnedSlice(),
@@ -568,8 +684,8 @@ pub fn main() !void {
     const window_width = 640;
     const window_height = 480;
 
-    const surface_width = 1920 / 4;
-    const surface_height = 1080 / 4;
+    const surface_width = 1080 / 4;
+    const surface_height = 1920 / 4;
 
     var renderer: Renderer = undefined;
 
@@ -608,7 +724,7 @@ pub fn main() !void {
     defer freeMesh(&shambler_mesh, allocator);
 
     const enable_raster_pass = true;
-    var enable_ray_pass = false;
+    const enable_ray_pass = false;
     _ = enable_ray_pass;
 
     // var default_prng = std.rand.DefaultPrng.init(@intCast(u64, std.time.timestamp()));
@@ -622,9 +738,9 @@ pub fn main() !void {
     const thread_pixel_height = render_target.height / core_count;
     _ = thread_pixel_height;
 
-    var thread_slice_index: usize = 0;
+    const thread_slice_index: usize = 0;
     _ = thread_slice_index;
-    var pixel_offset: @Vector(2, usize) = .{ 0, 0 };
+    const pixel_offset: @Vector(2, usize) = .{ 0, 0 };
     _ = pixel_offset;
 
     const spheres = [_]RayTracer.Sphere{
@@ -688,7 +804,7 @@ pub fn main() !void {
 
     var yaw: f32 = 420.7;
     var pitch: f32 = -15.5;
-    var roll: f32 = 0;
+    const roll: f32 = 0;
     _ = roll;
 
     var camera_enable: bool = false;
@@ -706,12 +822,14 @@ pub fn main() !void {
 
     var test_pipeline = TestPipeline.runtime;
 
+    var cull_mode: CommandBuffer.FaceCullMode = .back;
+
     while (!renderer.shouldWindowClose()) {
         const frame_start_time = std.time.microTimestamp();
         const time_s: f32 = @as(f32, @floatFromInt(c.SDL_GetTicks())) / 1000;
 
         if (true) {
-            @memset(render_target.texel_buffer, Image.Color.fromNormalized(.{ 0.25, 0.25, 1, 1 }));
+            @memset(render_target.texel_buffer, Image.Color.fromNormalized(.{ 0.25, 0.25, 0.25, 1 }));
             @memset(depth_target, 1);
 
             var render_pass = Renderer.Pass{
@@ -771,6 +889,7 @@ pub fn main() !void {
                     .vertices = &line_vertices,
                     .indices = &.{ 0, 1, 2, 3 },
                     .transform = zalgebra.Mat4.identity(),
+                    .transform_geo = .{},
                     .view_projection = zalgebra.Mat4.identity(),
                 };
                 _ = uniforms;
@@ -876,6 +995,15 @@ pub fn main() !void {
                     raster_unit.sort_triangles = !raster_unit.sort_triangles;
                 }
 
+                if (getKeyPressed(c.SDL_SCANCODE_F2)) {
+                    cull_mode = switch (cull_mode) {
+                        .none => .front,
+                        .front => .back,
+                        .back => .front_and_back,
+                        .front_and_back => .none,
+                    };
+                }
+
                 var triangle_matrix: zalgebra.Mat4 = zalgebra.Mat4.fromTranslate(.{ .data = .{ 0, 0, 1 + @sin(time_s) * 0 * 0 } });
 
                 triangle_matrix = triangle_matrix.mul(zalgebra.Mat4.fromEulerAngles(.{ .data = .{ 0, time_s * 0, 0 } }));
@@ -942,8 +1070,6 @@ pub fn main() !void {
 
                 command_buffer.setPipeline(&test_pipeline);
                 command_buffer.setScissor(.{
-                    // .offset = .{ surface_width / 4, surface_height / 4 },
-                    // .extent = .{ surface_width / 2, surface_height / 2 },
                     .offset = .{ 0, 0 },
                     .extent = .{ surface_width, surface_height },
                 });
@@ -955,25 +1081,26 @@ pub fn main() !void {
                     .depth_min = 0,
                     .depth_max = 1,
                 });
+                command_buffer.setFaceCullMode(cull_mode);
 
                 var point_lights: [2]PointLight = undefined;
 
                 point_lights[0] = .{
                     .color = .{ 1, 1, 1 },
                     .position = .{ -3, @cos(time_s), 5 },
-                    .intensity = 30 + @fabs(@sin(time_s) * 20),
+                    .intensity = 30 + @abs(@sin(time_s) * 20),
                 };
 
                 point_lights[1] = .{
                     .color = .{ 1, 0.4, 0.1 },
                     .position = .{ 3, @sin(time_s), -4 },
-                    .intensity = 20 + @fabs(@cos(time_s) * 30),
+                    .intensity = 20 + @abs(@cos(time_s) * 30),
                 };
 
                 point_lights[1] = .{
                     .color = .{ 1, 0.4, 0.1 },
                     .position = .{ 3, 16, -4 },
-                    .intensity = 300 + @fabs(@cos(time_s) * 30),
+                    .intensity = 300 + @abs(@cos(time_s) * 30),
                 };
 
                 var triangle_uniform: TestPipelineUniformInput = .{
@@ -981,6 +1108,9 @@ pub fn main() !void {
                     .vertices = &triangle_vertices,
                     .indices = &.{ 0, 1, 2 },
                     .transform = zalgebra.Mat4.fromTranslate(.{ .data = .{ 4, 1, 4 } }),
+                    .transform_geo = .{
+                        .position = .{ 4, 1, 4 },
+                    },
                     .view_projection = view_projection,
                 };
 
@@ -994,8 +1124,11 @@ pub fn main() !void {
                         .vertices = mesh.vertices,
                         .indices = mesh.indices,
                         .transform = zalgebra.Mat4.identity(),
+                        .transform_geo = .{},
                         .view_projection = zalgebra.Mat4.identity(),
                     };
+
+                    mesh_uniforms[i].transform_geo.scale = .{ 0.1, 0.1, 0.1 };
 
                     mesh_uniforms[i].transform = zalgebra.Mat4.identity().rotate(
                         time_s * 10,
@@ -1021,8 +1154,12 @@ pub fn main() !void {
                         .vertices = shambler_mesh.vertices,
                         .indices = shambler_mesh.indices,
                         .transform = zalgebra.Mat4.identity(),
+                        .transform_geo = .{},
                         .view_projection = zalgebra.Mat4.identity(),
                     };
+
+                    mesh_uniforms[i].transform_geo.position = .{ 30, 0, 50 };
+                    mesh_uniforms[i].transform_geo.scale = .{ 0.1, 0.1, 0.1 };
 
                     mesh_uniforms[i].transform = zalgebra.Mat4.fromTranslate(.{ .data = .{ 30, 0, 50 } }).rotate(
                         time_s * 10,
