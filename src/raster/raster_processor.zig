@@ -50,6 +50,40 @@ fn Fixed(comptime T: type, comptime integer_bits: comptime_int, fractional_bits:
     };
 }
 
+///Processor state
+pub const State = struct {
+    has_work: std.Thread.Condition = .{},
+    has_work_mutex: std.Thread.Mutex = .{},
+    should_kill: std.atomic.Value(bool) = .{ .raw = false },
+    input_queue: queue.AtomicQueue(geometry_processor.OutTriangle, 10 * 1024) = .{},
+    work_count: std.atomic.Value(i32) = .{ .raw = 0 },
+};
+
+const queue = @import("../queue.zig");
+
+pub fn threadMain(
+    raster_unit: *RasterUnit,
+    state: *State,
+) void {
+    @setRuntimeSafety(false);
+
+    while (!state.should_kill.load(.monotonic)) {
+        const work = raster_unit.out_triangle_queue.tryPop() orelse {
+            continue;
+        };
+
+        const triangle: geometry_processor.OutTriangle = work;
+
+        pipelineRasteriseTriangle(
+            raster_unit,
+            triangle.positions,
+            triangle.interpolators,
+        );
+
+        _ = state.work_count.fetchSub(1, .release);
+    }
+}
+
 ///Draws a triangle using rasterisation, supplying a pipeline
 ///Of operation functions
 pub fn pipelineRasteriseTriangle(
@@ -57,6 +91,8 @@ pub fn pipelineRasteriseTriangle(
     points: [3]@Vector(4, f32),
     fragment_inputs: [3]geometry_processor.TestPipelineFragmentInput,
 ) void {
+    @setRuntimeSafety(false);
+
     const Edge = struct {
         p0: @Vector(3, isize),
         p1: @Vector(3, isize),
@@ -154,6 +190,8 @@ inline fn drawEdges(
     right_p1: @Vector(3, isize),
     color: Image.Color,
 ) void {
+    @setRuntimeSafety(false);
+
     const x_diff: u64 = @abs(right_p1[0] - right_p0[0]) + @abs(left_p1[0] - left_p0[0]);
 
     if (x_diff == 0) return;
@@ -225,17 +263,33 @@ inline fn drawEdges(
         const x_min = @min(x0, x1);
         const x_max = @max(x0, x1);
 
-        drawSpan(
-            raster_unit,
-            x_min,
-            x_max,
-            triangle,
-            triangle_attributes,
-            screen_area,
-            inverse_screen_area,
-            pixel_y,
-            color,
-        );
+        const use_simd = true;
+        if (use_simd) {
+            drawSpanExperimental(
+                raster_unit,
+                x_min,
+                x_max,
+                triangle_attributes[0],
+                triangle_attributes[1],
+                triangle,
+                triangle_attributes,
+                screen_area,
+                inverse_screen_area,
+                pixel_y,
+            );
+        } else {
+            drawSpan(
+                raster_unit,
+                x_min,
+                x_max,
+                triangle,
+                triangle_attributes,
+                screen_area,
+                inverse_screen_area,
+                pixel_y,
+                color,
+            );
+        }
     }
 }
 
@@ -250,6 +304,8 @@ inline fn drawSpan(
     pixel_y: isize,
     color: Image.Color,
 ) void {
+    @setRuntimeSafety(false);
+
     _ = color;
     _ = screen_area;
 
@@ -345,7 +401,7 @@ inline fn drawSpan(
     }
 }
 
-fn drawSpanExperimental(
+inline fn drawSpanExperimental(
     raster_unit: *RasterUnit,
     x0: isize,
     x1: isize,
@@ -360,27 +416,24 @@ fn drawSpanExperimental(
     _ = interpolators1;
     _ = interpolators0;
     _ = screen_area;
-    // var pixel_x: isize = @max(x0, raster_unit.scissor.offset[0]);
-    // var pixel_x: isize = x0;
-
-    const pixel_increment: isize = switch (raster_unit.pipeline.polygon_fill_mode) {
-        .line => @max(@as(isize, @intCast(std.math.absCast(x1 - x0 - 1))), 1),
-        .fill => 1,
-    };
-    _ = pixel_increment;
 
     const start_x = @max(x0, raster_unit.scissor.offset[0]);
-    _ = start_x;
-    const end_x = @min(x1, raster_unit.scissor.extent[0]);
-    _ = end_x;
+    const end_x = @min(x1, raster_unit.scissor.extent[0] - 1);
 
-    const span_width = x1 - x0;
+    //Why the fuck is this ever able to be negative?
+    if (end_x - start_x <= 0) {
+        return;
+    }
+
+    const span_width: usize = @intCast(end_x - start_x);
+
+    const span_start: usize = @intCast(start_x);
 
     //The warp size is the largest vector size that fits in the largest vector register size
     //for the platform that allows for 32 bit scalars for each "thread" of execution per physical register
     const warp_size = 8;
     //Should use divCeil, but for now I'm using divFloor so we don't have to mask anything
-    const warp_count = std.math.absCast(std.math.divCeil(isize, span_width, warp_size) catch unreachable) + 1;
+    const warp_count = @divTrunc(span_width, warp_size) + 1;
 
     const last_warp_count: usize = @intCast(@rem(span_width, warp_size));
 
@@ -393,21 +446,23 @@ fn drawSpanExperimental(
     const fragment_y: @Vector(warp_size, u32) = @splat(@intCast(pixel_y));
     const point_y: @Vector(warp_size, f32) = @floatFromInt(fragment_y);
 
+    var last_mask: @Vector(warp_size, bool) = @splat(false);
+
+    for (0..last_warp_count) |i| {
+        last_mask[i] = true;
+    }
+
     for (0..warp_count) |warp_index| {
         var fragment_write_mask: @Vector(warp_size, bool) = @splat(true);
 
-        if (warp_index == warp_count - 1) {
-            for (last_warp_count..last_warp_count + 8 - last_warp_count) |i| {
-                fragment_write_mask[i] = false;
-            }
-        }
+        fragment_write_mask = @select(
+            bool,
+            @as(@Vector(warp_size, bool), @splat(warp_index != warp_count - 1)),
+            fragment_write_mask,
+            last_mask,
+        );
 
-        const warp_scan_start: u32 = @as(u32, @intCast(x0)) + @as(u32, @intCast(warp_index * 8));
-
-        // const pixel_out_start: [*]Image.Color = @ptrCast(raster_unit.render_pass.color_image.texelFetch(.{
-        //     .x = @intCast(warp_scan_start),
-        //     .y = @intCast(pixel_y),
-        // }));
+        const warp_scan_start: u32 = @as(u32, @intCast(span_start)) + @as(u32, @truncate(warp_index * 8));
 
         const fragment_x: @Vector(warp_size, u32) = .{
             warp_scan_start + 0,
@@ -487,74 +542,92 @@ fn drawSpanExperimental(
         //If the entire mask is zero then we can discard the whole warp
         const fragment_index = @as(usize, @intCast(warp_scan_start)) + @as(usize, @intCast(pixel_y)) * raster_unit.render_pass.color_image.width;
 
-        if (fragment_index + 8 >= raster_unit.render_pass.depth_buffer.len) {
-            return;
-        }
+        const fragment_index_vector: @Vector(warp_size, u32) = .{
+            @truncate(@min(fragment_index + 0, raster_unit.render_pass.depth_buffer.len - 1)),
+            @truncate(@min(fragment_index + 1, raster_unit.render_pass.depth_buffer.len - 1)),
+            @truncate(@min(fragment_index + 2, raster_unit.render_pass.depth_buffer.len - 1)),
+            @truncate(@min(fragment_index + 3, raster_unit.render_pass.depth_buffer.len - 1)),
+            @truncate(@min(fragment_index + 4, raster_unit.render_pass.depth_buffer.len - 1)),
+            @truncate(@min(fragment_index + 5, raster_unit.render_pass.depth_buffer.len - 1)),
+            @truncate(@min(fragment_index + 6, raster_unit.render_pass.depth_buffer.len - 1)),
+            @truncate(@min(fragment_index + 7, raster_unit.render_pass.depth_buffer.len - 1)),
+        };
 
         const previous_z: @Vector(warp_size, f32) = .{
-            raster_unit.render_pass.depth_buffer[fragment_index],
-            raster_unit.render_pass.depth_buffer[fragment_index + 1],
-            raster_unit.render_pass.depth_buffer[fragment_index + 2],
-            raster_unit.render_pass.depth_buffer[fragment_index + 3],
-            raster_unit.render_pass.depth_buffer[fragment_index + 4],
-            raster_unit.render_pass.depth_buffer[fragment_index + 5],
-            raster_unit.render_pass.depth_buffer[fragment_index + 6],
-            raster_unit.render_pass.depth_buffer[fragment_index + 7],
+            raster_unit.render_pass.depth_buffer[fragment_index_vector[0]],
+            raster_unit.render_pass.depth_buffer[fragment_index_vector[1]],
+            raster_unit.render_pass.depth_buffer[fragment_index_vector[2]],
+            raster_unit.render_pass.depth_buffer[fragment_index_vector[3]],
+            raster_unit.render_pass.depth_buffer[fragment_index_vector[4]],
+            raster_unit.render_pass.depth_buffer[fragment_index_vector[5]],
+            raster_unit.render_pass.depth_buffer[fragment_index_vector[6]],
+            raster_unit.render_pass.depth_buffer[fragment_index_vector[7]],
         };
 
         //Mask where true(1) means depth test succeed and 0 means depth test fail
-        const z_mask = point_z <= previous_z;
+        const z_mask = point_z < previous_z;
 
-        fragment_write_mask = z_mask;
+        const use_depth_testing = true;
+
+        if (use_depth_testing) {
+            const mask_int = @intFromBool(fragment_write_mask);
+            const z_mask_int = @intFromBool(z_mask);
+            const depth_min: @Vector(warp_size, f32) = @splat(raster_unit.depth_min);
+            const depth_max: @Vector(warp_size, f32) = @splat(raster_unit.depth_max);
+
+            const range_check_min = @intFromBool(point_z > depth_min);
+            const range_check_max = @intFromBool(point_z < depth_max);
+
+            //Why the fuck do I have to go through hoops to and a bool vector
+            const out_mask = mask_int & z_mask_int & range_check_min & range_check_max;
+            const vector_one: @Vector(8, u1) = @splat(1);
+
+            fragment_write_mask = out_mask == vector_one;
+        }
+
+        const debug_depth_reject = false;
 
         //If all invocations fail, skip
-        if (!@reduce(.And, fragment_write_mask)) {
-            // inline for (0..warp_size) |pixel_index| {
-            //     const pixel_out_start: [*]Image.Color = @ptrCast(raster_unit.render_pass.color_image.texelFetch(.{
-            //         .x = @intCast(warp_scan_start + pixel_index),
-            //         .y = @intCast(pixel_y),
-            //     }));
+        if (!@reduce(.Or, fragment_write_mask)) {
+            if (debug_depth_reject) {
+                inline for (0..warp_size) |pixel_index| {
+                    const pixel_out_start: [*]Image.Color = @ptrCast(raster_unit.render_pass.color_image.texelFetch(.{
+                        .x = @intCast(warp_scan_start + pixel_index),
+                        .y = @intCast(pixel_y),
+                    }));
 
-            //     pixel_out_start[0] = Image.Color{ .r = 255, .g = 0, .b = 0, .a = 255 };
-            // }
-
+                    if (!z_mask[pixel_index]) {
+                        pixel_out_start[0] = Image.Color{ .r = 255, .g = 0, .b = 0, .a = 255 };
+                        pixel_out_start[0].r +|= 5;
+                        pixel_out_start[0].g = 0;
+                        pixel_out_start[0].a = 255;
+                    }
+                }
+            }
             continue;
         }
 
-        //Fragment shader start
+        if (debug_depth_reject) {
+            inline for (0..warp_size) |pixel_index| {
+                const pixel_out_start: [*]Image.Color = @ptrCast(raster_unit.render_pass.color_image.texelFetch(.{
+                    .x = @intCast(warp_scan_start + pixel_index),
+                    .y = @intCast(pixel_y),
+                }));
 
-        //warp sizes: 1, 2, 4, 8, 16
-        //u0->u8  = 64 bit uniform registers, uniform to a warp, readonly
-        //
-        //b0->b127 = 16 bit virtual scalar registers
-        //s0->s63 = 16 bit virtual scalar registers
-        //r0->r31 = 32 bit virtual scalar registers
-        //w0->w15 = 64 bit virtual scalar registers
-        //v0->v7  = 128 bit virtual vector registers
+                const depth_out = @select(f32, fragment_write_mask, point_z, previous_z);
 
-        //load128 r0,
-        //load64
-        //load32 r0, u0 + r0;
-        //load16 r0, u0 + r0;
-        //load8 r0, u0 + r0;
-        //load_addr w0, u0 + r0;
-        //load32 r1, w0 + 0;
-        //load32 r1, w0 + 4;
-        //load32 r1, w0 + 8;
-        //iadd r0, r1, r2;
-        //isub r0, r1, r2;
-        //idiv r1, 1, r1;
-        //frcp r1, r0;
-        //fadd r1, 1, r1;
-        //fsub r1, 1, r1;
-        //fdiv r1, 1, r1;
-        //fmadd r1, r0, r1, r2;
-        //store32 r0, 0x00;
-        //texel_sample r1, u3, u4, 0.5, 0.5;
-        //texel_fetch r1, u3, 50, 50;
-        //texel_addr r1, u3, 50, 50;
-        //unpack_unorm4f32 r2, r1;
-        //ret
+                if (fragment_write_mask[pixel_index]) {
+                    pixel_out_start[0].g +|= 5;
+                    pixel_out_start[0].a = 255;
+
+                    if (fragment_index <= raster_unit.render_pass.depth_buffer.len) {
+                        const depth_out_buffer: *align(1) @Vector(warp_size, f32) = @ptrCast(&raster_unit.render_pass.depth_buffer[fragment_index]);
+                        depth_out_buffer[pixel_index] = depth_out[pixel_index];
+                    }
+                }
+            }
+            continue;
+        }
 
         var r: @Vector(warp_size, f32) = @splat(0);
         var g: @Vector(warp_size, f32) = @splat(0);
@@ -620,44 +693,46 @@ fn drawSpanExperimental(
 
         const uniforms: *const @import("root").TestPipelineUniformInput = @ptrCast(@alignCast(raster_unit.uniform));
 
-        const pixels = shader8xTest(
+        const pixels: @Vector(8, u32) = if (uniforms.texture != null) shader8xTest(
+            uniforms,
             @ptrCast(uniforms.texture.?.texel_buffer.ptr),
             @intCast(uniforms.texture.?.width),
             @intCast(uniforms.texture.?.height),
             u,
             v,
+        ) else @splat(0);
+
+        const fetched_pixels_unpacked = unpackUnorm4xf32(pixels);
+
+        const fragments = packUnorm4xf32(
+            r * fetched_pixels_unpacked.x,
+            g * fetched_pixels_unpacked.y,
+            b * fetched_pixels_unpacked.z,
+            a * fetched_pixels_unpacked.w,
         );
 
-        const depth_out = @select(f32, fragment_write_mask, point_z, previous_z);
+        const depth_out_buffer: *align(1) @Vector(warp_size, f32) = @ptrCast(&raster_unit.render_pass.depth_buffer[fragment_index]);
+        const fragment_out_buffer: *align(1) @Vector(warp_size, u32) = @ptrCast(&raster_unit.render_pass.color_image.texel_buffer.ptr[fragment_index]);
 
-        const fragments = packUnorm4xf32(a, b, g, r);
+        const shift_amnt: @Vector(warp_size, u32) = @splat(31);
 
-        inline for (0..warp_size) |pixel_index| {
-            const pixel_out_start: [*]Image.Color = @ptrCast(raster_unit.render_pass.color_image.texelFetch(.{
-                .x = @intCast(warp_scan_start + pixel_index),
-                .y = @intCast(pixel_y),
-            }));
+        maskedStore(f32, depth_out_buffer, point_z, @as(@Vector(warp_size, u32), @intFromBool(fragment_write_mask)) << shift_amnt);
 
-            raster_unit.render_pass.depth_buffer[fragment_index + pixel_index] = depth_out[pixel_index];
+        const use_linear_tiling = true;
 
-            if (fragment_write_mask[pixel_index]) {
-                pixel_out_start[0] = @bitCast(pixels[pixel_index]);
+        if (use_linear_tiling) {
+            maskedStore(u32, fragment_out_buffer, fragments, @as(@Vector(warp_size, u32), @intFromBool(fragment_write_mask)) << shift_amnt);
+        } else {
+            inline for (0..warp_size) |pixel_index| {
+                const pixel_out_start: [*]Image.Color = @ptrCast(raster_unit.render_pass.color_image.texelFetch(.{
+                    .x = @intCast(warp_scan_start + pixel_index),
+                    .y = @intCast(pixel_y),
+                }));
 
-                const fragment: Image.Color = @bitCast(pixels[pixel_index]);
-
-                pixel_out_start[0] = Image.Color.fromNormalized(.{
-                    r[pixel_index] * fragment.toNormalized()[0],
-                    g[pixel_index] * fragment.toNormalized()[1],
-                    b[pixel_index] * fragment.toNormalized()[2],
-                    a[pixel_index] * fragment.toNormalized()[3],
-                });
-                pixel_out_start[0] = @bitCast(fragments[pixel_index]);
-            } else {
-                // pixel_out_start[0] = Image.Color{ .r = 255, .g = 0, .b = 0, .a = 255 };
+                if (fragment_write_mask[pixel_index]) {
+                    pixel_out_start[0] = @bitCast(fragments[pixel_index]);
+                }
             }
-
-            // pixel_out_start[0] = Image.Color{ .r = 255, .g = 0, .b = 0, .a = 255 };
-            // pixel_out_start[0] = Image.Color.fromNormalized(.{ point_z[pixel_index] * 10, point_z[pixel_index] * 10, point_z[pixel_index] * 10, 1 });
         }
     }
 }
@@ -703,7 +778,7 @@ fn vectorDotGeneric3D(comptime N: comptime_int, comptime T: type, a: @Vector(N, 
     return @reduce(.Add, a * b);
 }
 
-inline fn gather(base: [*]const u32, address: @Vector(8, u32)) @Vector(8, u32) {
+inline fn gather(base: [*]align(16) const u32, address: @Vector(8, u32)) @Vector(8, u32) {
     var result: @Vector(8, u32) = undefined;
 
     inline for (0..8) |i| {
@@ -717,6 +792,22 @@ inline fn scatter(base: [*]u32, address: @Vector(8, u32), values: @Vector(8, u32
     inline for (0..8) |i| {
         base[address[i]] = values[i];
     }
+}
+
+//Stores values into destination based on the value of the mask
+inline fn maskedStore(
+    comptime T: type,
+    dest: *align(1) @Vector(8, T),
+    values: @Vector(8, T),
+    mask: @Vector(8, u32),
+) void {
+    asm volatile (
+        \\vmaskmovps %[values],  %[mask], (%[dest])
+        :
+        : [dest] "r" (dest),
+          [values] "v" (values),
+          [mask] "v" (mask),
+    );
 }
 
 inline fn packUnorm4xf32(
@@ -737,18 +828,184 @@ inline fn packUnorm4xf32(
 
     var result: @Vector(8, u32) = undefined;
 
-    result = @intCast(x_int << @as(@Vector(8, u5), @splat(24)));
-    result |= @intCast(y_int << @as(@Vector(8, u5), @splat(16)));
-    result |= @intCast(z_int << @as(@Vector(8, u5), @splat(8)));
-    result |= @intCast(w_int);
+    result = @intCast(w_int << @as(@Vector(8, u5), @splat(24)));
+    result |= @intCast(z_int << @as(@Vector(8, u5), @splat(16)));
+    result |= @intCast(y_int << @as(@Vector(8, u5), @splat(8)));
+    result |= @intCast(x_int);
 
     return result;
+}
+
+inline fn unpackUnorm4xf32(value: @Vector(8, u32)) struct {
+    x: @Vector(8, f32),
+    y: @Vector(8, f32),
+    z: @Vector(8, f32),
+    w: @Vector(8, f32),
+} {
+    const w_int: @Vector(8, u32) = @intCast((value & @as(@Vector(8, u32), @splat(0xff000000))) >> @as(@Vector(8, u5), @splat(24)));
+    const z_int: @Vector(8, u32) = @intCast((value & @as(@Vector(8, u32), @splat(0x00ff0000))) >> @as(@Vector(8, u5), @splat(16)));
+    const y_int: @Vector(8, u32) = @intCast((value & @as(@Vector(8, u32), @splat(0x0000ff00))) >> @as(@Vector(8, u5), @splat(8)));
+    const x_int: @Vector(8, u32) = @intCast(value & @as(@Vector(8, u32), @splat(0x000000ff)));
+
+    const x: @Vector(8, f32) = @floatFromInt(x_int);
+    const y: @Vector(8, f32) = @floatFromInt(y_int);
+    const z: @Vector(8, f32) = @floatFromInt(z_int);
+    const w: @Vector(8, f32) = @floatFromInt(w_int);
+
+    const x_scaled = x / @as(@Vector(8, f32), @splat(255));
+    const y_scaled = y / @as(@Vector(8, f32), @splat(255));
+    const z_scaled = z / @as(@Vector(8, f32), @splat(255));
+    const w_scaled = w / @as(@Vector(8, f32), @splat(255));
+
+    return .{
+        .x = x_scaled,
+        .y = y_scaled,
+        .z = z_scaled,
+        .w = w_scaled,
+    };
+}
+
+///Pointer to an optimally tiled (8x8) image
+const ImageDescriptor = packed struct(u128) {
+    base: [*]align(16) const u32,
+    width: u32,
+    height: u32,
+};
+
+pub fn WarpRegister(comptime T: type) type {
+    const warp_size = 8;
+
+    return @Vector(warp_size, T);
+}
+
+pub fn Vec2(comptime T: type) type {
+    return struct {
+        x: WarpRegister(T),
+        y: WarpRegister(T),
+    };
+}
+
+pub fn Vec3(comptime T: type) type {
+    return struct {
+        x: WarpRegister(T),
+        y: WarpRegister(T),
+        z: WarpRegister(T),
+    };
+}
+
+pub fn Vec4(comptime T: type) type {
+    return struct {
+        x: WarpRegister(T),
+        y: WarpRegister(T),
+        z: WarpRegister(T),
+        w: WarpRegister(T),
+
+        pub inline fn neg(self: @This()) @This() {
+            return .{
+                .x = -self.x,
+                .y = -self.y,
+                .z = -self.z,
+                .w = -self.w,
+            };
+        }
+
+        pub inline fn add(left: @This(), right: @This()) @This() {
+            return .{
+                .x = left.x + right.x,
+                .y = left.y + right.y,
+                .z = left.z + right.z,
+                .w = left.w + right.w,
+            };
+        }
+
+        pub inline fn hadamardProduct(left: @This(), right: @This()) @This() {
+            return .{
+                .x = left.x * right.x,
+                .y = left.y * right.y,
+                .z = left.z * right.z,
+                .w = left.w * right.w,
+            };
+        }
+
+        pub inline fn scalarProduct(left: @This(), right: @This()) WarpRegister(T) {
+            const xx = left.x * right.x;
+            const yy = left.y * right.y;
+            const zz = left.z * right.z;
+            const ww = left.w * right.w;
+
+            return xx + yy + zz + ww;
+        }
+
+        pub inline fn scale(left: @This(), right: WarpRegister(T)) @This() {
+            return .{
+                .x = left.x * right,
+                .y = left.y * right,
+                .z = left.z * right,
+                .w = left.w * right,
+            };
+        }
+    };
+}
+
+pub fn Mat4x4(comptime T: type) type {
+    return struct {
+        elements: [16]WarpRegister(T),
+    };
+}
+
+inline fn imageTexelFetch(
+    descriptor: ImageDescriptor,
+    x: WarpRegister(u32),
+    y: WarpRegister(u32),
+) WarpRegister(u32) {
+    //idx = y * width + x = fma(y, width, x); (linear mode)
+    var texel_address: @Vector(8, u32) = undefined;
+
+    //Could use a shift if image widths were restricted to be power of two size
+    texel_address = y * @as(@Vector(8, u32), @splat(descriptor.width)) + x;
+    // texel_address = (texel_y << @as(@Vector(8, u32), @splat(img_width_po2))) + texel_x;
+
+    const tile_width = 8;
+    const tile_height = tile_width;
+
+    //texel fetch
+    const tile_count_x: @Vector(8, u32) = @splat(descriptor.width / tile_width);
+
+    const tile_x = @divFloor(x, @as(@Vector(8, u32), @splat(tile_width)));
+    const tile_y = @divFloor(y, @as(@Vector(8, u32), @splat(tile_height)));
+
+    const tile_begin_x = tile_x * @as(@Vector(8, u32), @splat(tile_width));
+    const tile_begin_y = tile_y * @as(@Vector(8, u32), @splat(tile_height));
+
+    const tile_pointer: @Vector(8, u32) = ((tile_x + tile_y * tile_count_x) * @as(@Vector(8, u32), @splat(tile_width * tile_height)));
+
+    //x, y relative to tile
+    const local_tile_x = x - tile_begin_x;
+    const local_tile_y = y - tile_begin_y;
+
+    texel_address = tile_pointer + local_tile_y * @as(@Vector(8, u32), @splat(tile_width)) + local_tile_x;
+
+    const texel = gather(descriptor.base, texel_address);
+
+    return texel;
+}
+
+///Nearest neighbour texture sampling. Does not handle wrapping
+inline fn imageTexelSampleNearest(
+    descriptor: ImageDescriptor,
+    u: WarpRegister(f32),
+    v: WarpRegister(f32),
+) WarpRegister(u32) {
+    _ = u; // autofix
+    _ = v; // autofix
+    _ = descriptor; // autofix
 }
 
 ///Execute 8 fragment shaders at a time
 ///Returns a 8 vector of u32 rgba values
 fn shader8xTest(
-    img: [*]const u32,
+    uniforms: *const @import("root").TestPipelineUniformInput,
+    img: [*]align(16) const u32,
     ///Power of two image width
     img_width_po2: u32,
     ///Power of two image height
@@ -756,14 +1013,11 @@ fn shader8xTest(
     u: @Vector(8, f32),
     v: @Vector(8, f32),
 ) @Vector(8, u32) {
+    _ = uniforms; // autofix
     const tile_width = Image.tile_width;
+    _ = tile_width; // autofix
     const tile_height = Image.tile_height;
-
-    std.debug.assert(@reduce(.And, u >= @as(@Vector(8, f32), @splat(0))) and
-        @reduce(.And, u <= @as(@Vector(8, f32), @splat(1))));
-
-    std.debug.assert(@reduce(.And, v >= @as(@Vector(8, f32), @splat(0))) and
-        @reduce(.And, v <= @as(@Vector(8, f32), @splat(1))));
+    _ = tile_height; // autofix
 
     const width_float: @Vector(8, f32) = @splat(@floatFromInt(img_width_po2));
     const height_float: @Vector(8, f32) = @splat(@floatFromInt(img_height_po2));
@@ -774,31 +1028,12 @@ fn shader8xTest(
     texel_x = @intFromFloat(u * width_float);
     texel_y = @intFromFloat(v * height_float);
 
-    //idx = y * width + x = fma(y, width, x); (linear mode)
-    var texel_address: @Vector(8, u32) = undefined;
-
-    //Could use a shift if image widths were restricted to be power of two size
-    texel_address = texel_y * @as(@Vector(8, u32), @splat(img_width_po2)) + texel_x;
-    // texel_address = (texel_y << @as(@Vector(8, u32), @splat(img_width_po2))) + texel_x;
-
-    //texel fetch
-    const tile_count_x: @Vector(8, u32) = @splat(@intCast(std.math.divCeil(usize, img_width_po2, tile_width) catch unreachable));
-
-    const tile_x = @divFloor(texel_x, @as(@Vector(8, u32), @splat(tile_width)));
-    const tile_y = @divFloor(texel_y, @as(@Vector(8, u32), @splat(tile_height)));
-
-    const tile_begin_x = tile_x * @as(@Vector(8, u32), @splat(tile_width));
-    const tile_begin_y = tile_y * @as(@Vector(8, u32), @splat(tile_height));
-
-    const tile_pointer: @Vector(8, u32) = ((tile_x + tile_y * tile_count_x) * @as(@Vector(8, u32), @splat(tile_width * tile_height)));
-
-    //x, y relative to tile
-    const x = texel_x - tile_begin_x;
-    const y = texel_y - tile_begin_y;
-
-    texel_address = tile_pointer + y * @as(@Vector(8, u32), @splat(tile_width)) + x;
-
-    const texel = gather(img, texel_address);
+    //idx = y * width + x = fma(y, width, x); (linear mo
+    const texel = imageTexelFetch(
+        .{ .base = img, .width = img_width_po2, .height = img_height_po2 },
+        texel_x,
+        texel_y,
+    );
 
     return texel;
 }

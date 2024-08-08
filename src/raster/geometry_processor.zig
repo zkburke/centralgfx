@@ -98,18 +98,6 @@ fn pipelineDrawTriangle(
     triangle[1] = raster_unit.pipeline.vertexShader(raster_unit.uniform, vertex_offset + triangle_index * 3 + 1, &fragment_input_1);
     triangle[2] = raster_unit.pipeline.vertexShader(raster_unit.uniform, vertex_offset + triangle_index * 3 + 2, &fragment_input_2);
 
-    //We should be able to scale by w instead of 1/w
-    // const two_triangle_area = twoTriangleArea(.{
-    //     .{ triangle[0][0] * (1 / triangle[0][3]), triangle[0][1] * (1 / triangle[0][3]) },
-    //     .{ triangle[1][0] * (1 / triangle[1][3]), triangle[1][1] * (1 / triangle[1][3]) },
-    //     .{ triangle[2][0] * (1 / triangle[2][3]), triangle[2][1] * (1 / triangle[2][3]) },
-    // });
-
-    // //backface and contribution cull
-    // if (two_triangle_area <= 0) {
-    //     return;
-    // }
-
     {
         const pa: @Vector(2, f32) = .{ triangle[0][0] / triangle[0][3], triangle[0][1] / triangle[0][3] };
         const pb: @Vector(2, f32) = .{ triangle[1][0] / triangle[1][3], triangle[1][1] / triangle[1][3] };
@@ -254,14 +242,6 @@ fn emitTriangle(
     points = perspectiveDivide(points);
 
     for (&points) |*point| {
-        // if (point[2] <= 0) {
-        //     return;
-        // }
-
-        // if (point[3] <= 0) {
-        //     return;
-        // }
-
         point.* = @mulAdd(
             @Vector(4, f32),
             point.*,
@@ -270,10 +250,12 @@ fn emitTriangle(
         );
     }
 
-    raster_unit.out_triangles.append(.{
+    _ = raster_unit.raster_processor_state.work_count.fetchAdd(1, .release);
+
+    _ = raster_unit.out_triangle_queue.tryPush(.{
         .positions = points,
         .interpolators = interpolators,
-    }) catch {};
+    });
 }
 
 pub fn TriangleClipper(comptime Interpolator: type) type {

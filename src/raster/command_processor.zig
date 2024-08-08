@@ -45,7 +45,19 @@ fn executeWorkload(
     command_buffer: *const CommandBuffer,
     render_finished: *std.Thread.Semaphore,
 ) void {
-    render_finished.wait();
+    _ = render_finished; // autofix
+    // render_finished.wait();
+    //command prepass
+
+    var total_vertex_count: u32 = 0;
+    for (command_buffer.commands.items) |command| {
+        switch (command) {
+            .draw => |draw| {
+                total_vertex_count += draw.vertex_count;
+            },
+            else => {},
+        }
+    }
 
     for (command_buffer.commands.items) |command| {
         switch (command) {
@@ -53,7 +65,8 @@ fn executeWorkload(
                 raster_unit.render_pass = begin_raster_pass.pass;
             },
             .end_raster_pass => {
-                raster_unit.out_triangles.len = 0;
+                //TODO: wait for the work to drain
+                // raster_unit.submit_wait_semaphore.wait();
             },
             .set_pipeline => |bind_pipeline| {
                 raster_unit.pipeline = bind_pipeline.pipeline;
@@ -82,35 +95,15 @@ fn executeWorkload(
                     draw.vertex_offset,
                     draw.vertex_count,
                 );
-
-                const S = struct {
-                    pub fn lessThan(_: void, lhs: geometry_processor.OutTriangle, rhs: geometry_processor.OutTriangle) bool {
-                        const nearest_z_a = @max(lhs.positions[0][2], @max(lhs.positions[1][2], lhs.positions[2][2]));
-                        const nearest_z_b = @max(rhs.positions[0][2], @max(rhs.positions[1][2], rhs.positions[2][2]));
-
-                        return nearest_z_a < nearest_z_b;
-                    }
-                };
-
-                if (raster_unit.sort_triangles) std.sort.insertion(
-                    geometry_processor.OutTriangle,
-                    raster_unit.out_triangles.buffer[0..raster_unit.out_triangles.len],
-                    {},
-                    S.lessThan,
-                );
-
-                for (raster_unit.out_triangles.buffer[0..raster_unit.out_triangles.len]) |out_triangle| {
-                    raster_processor.pipelineRasteriseTriangle(
-                        raster_unit,
-                        out_triangle.positions,
-                        out_triangle.interpolators,
-                    );
-                }
             },
         }
     }
 
-    render_finished.post();
+    while (raster_unit.raster_processor_state.work_count.load(.acquire) > 0) {}
+
+    raster_unit.raster_processor_state.work_count.store(0, .release);
+
+    // render_finished.post();
 }
 
 pub fn submit(

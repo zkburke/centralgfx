@@ -1616,9 +1616,15 @@ pub fn drawTriangle(
 }
 
 pub fn presentImage(self: Renderer, image: Image) void {
-    for (0..image.height) |y| {
-        for (0..image.width) |x| {
-            self.swapchain_image[x + y * image.width] = image.texelFetch(.{ .x = x, .y = y }).*;
+    const use_linear_tiling = true;
+    if (use_linear_tiling) {
+        const cpy_len = @min(self.swapchain_image.len, image.texel_buffer.len);
+        @memcpy(self.swapchain_image[0..cpy_len], image.texel_buffer[0..cpy_len]);
+    } else {
+        for (0..image.height) |y| {
+            for (0..image.width) |x| {
+                self.swapchain_image[x + y * image.width] = image.texelFetch(.{ .x = x, .y = y }).*;
+            }
         }
     }
 

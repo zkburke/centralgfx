@@ -4,6 +4,7 @@ pipeline: *const Pipeline = undefined,
 uniform: *const anyopaque = undefined,
 render_pass: *const Renderer.Pass = undefined,
 renderer: *Renderer = undefined,
+rasterizer_thread: std.Thread = undefined,
 command_processor_thread: if (!@import("builtin").single_threaded) std.Thread else void = undefined,
 
 scissor: struct {
@@ -24,7 +25,8 @@ depth_max: f32 = 1,
 
 sort_triangles: bool = false,
 
-out_triangles: std.BoundedArray(geometry_processor.OutTriangle, triangle_queue_size) = .{},
+// out_triangles: std.BoundedArray(geometry_processor.OutTriangle, triangle_queue_size) = .{},
+out_triangle_queue: queue.AtomicQueue(geometry_processor.OutTriangle, triangle_queue_size) = .{},
 
 ///stored in x, y, z, w form
 triangle_positions: std.BoundedArray(@Vector(4, f32), triangle_queue_size) = .{},
@@ -53,28 +55,45 @@ command_queue: struct {
     next_entry_to_write: u32 = 0,
     semaphore: std.Thread.Semaphore = .{ .permits = 1 },
 } = .{},
+raster_processor_state: raster_processor.State = undefined,
+submit_wait_semaphore: std.Thread.Semaphore = .{},
 
 pub fn init(self: *RasterUnit, renderer: *Renderer) !void {
     if (!@import("builtin").single_threaded) {
-        const command_processor_thread = try std.Thread.spawn(.{}, command_processor.init, .{self});
+        // const command_processor_thread = try std.Thread.spawn(.{}, command_processor.init, .{self});
 
-        self.command_processor_thread = command_processor_thread;
+        // self.command_processor_thread = command_processor_thread;
     }
 
+    self.raster_processor_state = .{};
+    self.rasterizer_thread = try std.Thread.spawn(.{}, raster_processor.threadMain, .{
+        self,
+        &self.raster_processor_state,
+    });
+
     self.renderer = renderer;
-    self.out_triangles = .{};
 }
 
 pub fn deinit(self: *RasterUnit) void {
     defer self.* = undefined;
 
-    if (!@import("builtin").single_threaded) self.command_processor_thread.detach();
+    {
+        self.raster_processor_state.should_kill.store(true, .monotonic);
+    }
+
+    self.raster_processor_state.has_work.signal();
+
+    self.command_processor_thread.join();
+
+    // if (!@import("builtin").single_threaded) self.command_processor_thread.detach();
 }
 
 const std = @import("std");
 const command_processor = @import("command_processor.zig");
 const geometry_processor = @import("geometry_processor.zig");
+const raster_processor = @import("raster_processor.zig");
 const Pipeline = @import("../Pipeline.zig");
 const Renderer = @import("../Renderer.zig");
 const CommandBuffer = @import("../CommandBuffer.zig");
 const RasterUnit = @This();
+const queue = @import("../queue.zig");

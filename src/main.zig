@@ -205,6 +205,7 @@ fn testVertexShader(
 
     color[(vertex_index / 3) % 3] = triangle_color;
     color[(vertex_index / 3 + 1) % 3] = triangle_color + 0.25;
+    // color = @splat(1);
 
     const output: TestPipelineFragmentInput = .{
         .color = color,
@@ -233,7 +234,7 @@ fn testFragmentShader(
         color *= texture.sample(input.uv, .point, .black).toNormalized();
     }
 
-    const enable_lighting = false;
+    const enable_lighting = true;
 
     if (enable_lighting) {
         var light_contribution: @Vector(3, f32) = .{ 0.1, 0.1, 0.1 };
@@ -243,7 +244,7 @@ fn testFragmentShader(
             const light_dir = zalgebra.Vec3.norm(.{ .data = light_pos - input.position_world_space }).data;
             const light_radius = 0.01;
 
-            const distance_to_light = zalgebra.Vec3.distance(.{ .data = light_pos }, .{input.position_world_space});
+            const distance_to_light = zalgebra.Vec3.distance(.{ .data = light_pos }, .{ .data = input.position_world_space });
 
             const attentuation = 1 / @max(distance_to_light * distance_to_light, light_radius * light_radius);
 
@@ -681,11 +682,11 @@ pub fn main() !void {
         allocator.free(previous_keyboard_state.?);
     };
 
-    const window_width = 640;
-    const window_height = 480;
+    const window_width = 1600;
+    const window_height = 900;
 
-    const surface_width = 1080 / 4;
-    const surface_height = 1920 / 4;
+    const surface_width = if (@import("builtin").mode == .ReleaseFast) 1080 else 1080 / 4;
+    const surface_height = if (@import("builtin").mode == .ReleaseFast) 1920 else 1920 / 4;
 
     var renderer: Renderer = undefined;
 
@@ -1083,7 +1084,7 @@ pub fn main() !void {
                 });
                 command_buffer.setFaceCullMode(cull_mode);
 
-                var point_lights: [2]PointLight = undefined;
+                var point_lights: [3]PointLight = undefined;
 
                 point_lights[0] = .{
                     .color = .{ 1, 1, 1 },
@@ -1097,8 +1098,8 @@ pub fn main() !void {
                     .intensity = 20 + @abs(@cos(time_s) * 30),
                 };
 
-                point_lights[1] = .{
-                    .color = .{ 1, 0.4, 0.1 },
+                point_lights[2] = .{
+                    .color = .{ 0, 0.3, 0.9 },
                     .position = .{ 3, 16, -4 },
                     .intensity = 300 + @abs(@cos(time_s) * 30),
                 };
@@ -1117,6 +1118,7 @@ pub fn main() !void {
                 command_buffer.draw(&triangle_uniform, 0, 3);
 
                 var mesh_uniforms: [256]TestPipelineUniformInput = undefined;
+                var mesh_base: usize = 0;
 
                 for (mesh.sub_meshes[0..], 0..) |sub_mesh, i| {
                     mesh_uniforms[i] = .{
@@ -1148,35 +1150,39 @@ pub fn main() !void {
                     );
                 }
 
-                for (shambler_mesh.sub_meshes[0..], mesh.sub_meshes.len..) |sub_mesh, i| {
-                    mesh_uniforms[i] = .{
-                        .texture = shambler_mesh.textures[sub_mesh.albedo_texture_index],
-                        .vertices = shambler_mesh.vertices,
-                        .indices = shambler_mesh.indices,
-                        .transform = zalgebra.Mat4.identity(),
-                        .transform_geo = .{},
-                        .view_projection = zalgebra.Mat4.identity(),
-                    };
+                mesh_base += mesh.sub_meshes.len;
 
-                    mesh_uniforms[i].transform_geo.position = .{ 30, 0, 50 };
-                    mesh_uniforms[i].transform_geo.scale = .{ 0.1, 0.1, 0.1 };
+                for (0..50) |shambler_index| {
+                    for (shambler_mesh.sub_meshes[0..], mesh.sub_meshes.len..) |sub_mesh, i| {
+                        mesh_uniforms[mesh_base + shambler_index + i] = .{
+                            .texture = shambler_mesh.textures[sub_mesh.albedo_texture_index],
+                            .vertices = shambler_mesh.vertices,
+                            .indices = shambler_mesh.indices,
+                            .transform = zalgebra.Mat4.identity(),
+                            .transform_geo = .{},
+                            .view_projection = zalgebra.Mat4.identity(),
+                        };
 
-                    mesh_uniforms[i].transform = zalgebra.Mat4.fromTranslate(.{ .data = .{ 30, 0, 50 } }).rotate(
-                        time_s * 10,
-                        .{ .data = .{ 0, 1, 0 } },
-                    ).scale(
-                        .{ .data = .{ 0.1, 0.1, 0.1 } },
-                    );
-                    mesh_uniforms[i].view_projection = view_projection;
-                    mesh_uniforms[i].base_vertex = sub_mesh.vertex_offset;
-                    mesh_uniforms[i].texture = shambler_mesh.textures[sub_mesh.albedo_texture_index];
-                    mesh_uniforms[i].lights = &point_lights;
+                        mesh_uniforms[mesh_base + shambler_index + i].transform_geo.position = .{ 30, 0, 50 };
+                        mesh_uniforms[mesh_base + shambler_index + i].transform_geo.scale = .{ 0.1, 0.1, 0.1 };
 
-                    command_buffer.draw(
-                        &mesh_uniforms[i],
-                        sub_mesh.index_offset,
-                        sub_mesh.index_count,
-                    );
+                        mesh_uniforms[mesh_base + shambler_index + i].transform = zalgebra.Mat4.fromTranslate(.{ .data = .{ 30 + @as(f32, @floatFromInt(shambler_index * 70)), 0, 50 } }).rotate(
+                            time_s * 10,
+                            .{ .data = .{ 0, 1, 0 } },
+                        ).scale(
+                            .{ .data = .{ 0.1, 0.1, 0.1 } },
+                        );
+                        mesh_uniforms[mesh_base + shambler_index + i].view_projection = view_projection;
+                        mesh_uniforms[mesh_base + shambler_index + i].base_vertex = sub_mesh.vertex_offset;
+                        mesh_uniforms[mesh_base + shambler_index + i].texture = shambler_mesh.textures[sub_mesh.albedo_texture_index];
+                        mesh_uniforms[mesh_base + shambler_index + i].lights = &point_lights;
+
+                        command_buffer.draw(
+                            &mesh_uniforms[mesh_base + shambler_index + i],
+                            sub_mesh.index_offset,
+                            sub_mesh.index_count,
+                        );
+                    }
                 }
 
                 command_buffer.endRasterPass();
@@ -1191,7 +1197,9 @@ pub fn main() !void {
                     &semaphore,
                 );
 
-                semaphore.wait();
+                std.log.info("Presenting", .{});
+
+                // semaphore.wait();
             }
 
             // if (enable_ray_pass) {
