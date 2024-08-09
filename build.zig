@@ -27,6 +27,12 @@ pub fn build(b: *std.Build) void {
         .root_source_file = .{ .cwd_relative = "lib/zgltf/src/main.zig" },
     });
 
+    const installed_asm = b.addInstallFile(
+        exe.getEmittedAsm(),
+        "output.s",
+    );
+    _ = installed_asm; // autofix
+
     // exe.single_threaded = true;
 
     b.installArtifact(exe);

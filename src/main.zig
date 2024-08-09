@@ -685,8 +685,8 @@ pub fn main() !void {
     const window_width = 1600;
     const window_height = 900;
 
-    const surface_width = if (@import("builtin").mode == .ReleaseFast) 1080 else 1080 / 4;
-    const surface_height = if (@import("builtin").mode == .ReleaseFast) 1920 else 1920 / 4;
+    const surface_width = if (@import("builtin").mode == .ReleaseFast) 1080 / 1 else 1080 / 4;
+    const surface_height = if (@import("builtin").mode == .ReleaseFast) 1920 / 1 else 1920 / 4;
 
     var renderer: Renderer = undefined;
 
@@ -1084,7 +1084,7 @@ pub fn main() !void {
                 });
                 command_buffer.setFaceCullMode(cull_mode);
 
-                var point_lights: [3]PointLight = undefined;
+                var point_lights: [4]PointLight = undefined;
 
                 point_lights[0] = .{
                     .color = .{ 1, 1, 1 },
@@ -1102,6 +1102,12 @@ pub fn main() !void {
                     .color = .{ 0, 0.3, 0.9 },
                     .position = .{ 3, 16, -4 },
                     .intensity = 300 + @abs(@cos(time_s) * 30),
+                };
+
+                point_lights[3] = .{
+                    .color = .{ 0.9, 0.9, 0.9 },
+                    .position = .{ 3 + @abs(@sin(time_s)) * 100, 35, -4 },
+                    .intensity = 4000 + @abs(@cos(time_s) * 60),
                 };
 
                 var triangle_uniform: TestPipelineUniformInput = .{

@@ -25,7 +25,6 @@ depth_max: f32 = 1,
 
 sort_triangles: bool = false,
 
-// out_triangles: std.BoundedArray(geometry_processor.OutTriangle, triangle_queue_size) = .{},
 out_triangle_queue: queue.AtomicQueue(geometry_processor.OutTriangle, triangle_queue_size) = .{},
 
 ///stored in x, y, z, w form

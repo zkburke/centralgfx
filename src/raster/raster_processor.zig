@@ -444,7 +444,7 @@ inline fn drawSpanExperimental(
     });
 
     const fragment_y: @Vector(warp_size, u32) = @splat(@intCast(pixel_y));
-    const point_y: @Vector(warp_size, f32) = @floatFromInt(fragment_y);
+    const point_y: WarpRegister(f32) = @floatFromInt(fragment_y);
 
     var last_mask: @Vector(warp_size, bool) = @splat(false);
 
@@ -475,50 +475,50 @@ inline fn drawSpanExperimental(
             warp_scan_start + 7,
         };
 
-        const point_x: @Vector(warp_size, f32) = @floatFromInt(fragment_x);
+        const point_x: WarpRegister(f32) = @floatFromInt(fragment_x);
 
-        var point_z: @Vector(warp_size, f32) = @splat(0);
+        var point_z: WarpRegister(f32) = @splat(0);
 
-        var barycentric_x: @Vector(warp_size, f32) = undefined;
-        var barycentric_y: @Vector(warp_size, f32) = undefined;
-        var barycentric_z: @Vector(warp_size, f32) = undefined;
+        var barycentric_x: WarpRegister(f32) = undefined;
+        var barycentric_y: WarpRegister(f32) = undefined;
+        var barycentric_z: WarpRegister(f32) = undefined;
 
         //Compute barycentrics
         {
-            const pb_x = @as(@Vector(warp_size, f32), @splat(triangle[1][0])) - point_x;
-            const pb_y = @as(@Vector(warp_size, f32), @splat(triangle[1][1])) - point_y;
+            const pb_x = @as(WarpRegister(f32), @splat(triangle[1][0])) - point_x;
+            const pb_y = @as(WarpRegister(f32), @splat(triangle[1][1])) - point_y;
 
-            const cp_x = @as(@Vector(warp_size, f32), @splat(triangle[2][0])) - point_x;
-            const cp_y = @as(@Vector(warp_size, f32), @splat(triangle[2][1])) - point_y;
+            const cp_x = @as(WarpRegister(f32), @splat(triangle[2][0])) - point_x;
+            const cp_y = @as(WarpRegister(f32), @splat(triangle[2][1])) - point_y;
 
-            const pa_x = @as(@Vector(warp_size, f32), @splat(triangle[0][0])) - point_x;
-            const pa_y = @as(@Vector(warp_size, f32), @splat(triangle[0][1])) - point_y;
+            const pa_x = @as(WarpRegister(f32), @splat(triangle[0][0])) - point_x;
+            const pa_y = @as(WarpRegister(f32), @splat(triangle[0][1])) - point_y;
 
             const one_over_area = inverse_screen_area;
 
             const areas_x = @abs(pb_x * cp_y - cp_x * pb_y);
             const areas_y = @abs(cp_x * pa_y - pa_x * cp_y);
 
-            barycentric_x = areas_x * @as(@Vector(warp_size, f32), @splat(one_over_area));
-            barycentric_y = areas_y * @as(@Vector(warp_size, f32), @splat(one_over_area));
-            barycentric_z = @as(@Vector(warp_size, f32), @splat(1)) - (barycentric_x + barycentric_y);
+            barycentric_x = areas_x * @as(WarpRegister(f32), @splat(one_over_area));
+            barycentric_y = areas_y * @as(WarpRegister(f32), @splat(one_over_area));
+            barycentric_z = @as(WarpRegister(f32), @splat(1)) - (barycentric_x + barycentric_y);
 
-            barycentric_x = @max(barycentric_x, @as(@Vector(warp_size, f32), @splat(0)));
-            barycentric_y = @max(barycentric_y, @as(@Vector(warp_size, f32), @splat(0)));
-            barycentric_z = @max(barycentric_z, @as(@Vector(warp_size, f32), @splat(0)));
+            barycentric_x = @max(barycentric_x, @as(WarpRegister(f32), @splat(0)));
+            barycentric_y = @max(barycentric_y, @as(WarpRegister(f32), @splat(0)));
+            barycentric_z = @max(barycentric_z, @as(WarpRegister(f32), @splat(0)));
 
-            barycentric_x = @min(barycentric_x, @as(@Vector(warp_size, f32), @splat(1)));
-            barycentric_y = @min(barycentric_y, @as(@Vector(warp_size, f32), @splat(1)));
-            barycentric_z = @min(barycentric_z, @as(@Vector(warp_size, f32), @splat(1)));
+            barycentric_x = @min(barycentric_x, @as(WarpRegister(f32), @splat(1)));
+            barycentric_y = @min(barycentric_y, @as(WarpRegister(f32), @splat(1)));
+            barycentric_z = @min(barycentric_z, @as(WarpRegister(f32), @splat(1)));
         }
 
-        barycentric_x = barycentric_x * @as(@Vector(warp_size, f32), @splat(reciprocal_w[0]));
-        barycentric_y = barycentric_y * @as(@Vector(warp_size, f32), @splat(reciprocal_w[1]));
-        barycentric_z = barycentric_z * @as(@Vector(warp_size, f32), @splat(reciprocal_w[2]));
+        barycentric_x = barycentric_x * @as(WarpRegister(f32), @splat(reciprocal_w[0]));
+        barycentric_y = barycentric_y * @as(WarpRegister(f32), @splat(reciprocal_w[1]));
+        barycentric_z = barycentric_z * @as(WarpRegister(f32), @splat(reciprocal_w[2]));
 
         const barycentric_sum = barycentric_x + barycentric_y + barycentric_z;
 
-        const reciprocal_barycentric_sum = @as(@Vector(warp_size, f32), @splat(1)) / barycentric_sum;
+        const reciprocal_barycentric_sum = @as(WarpRegister(f32), @splat(1)) / barycentric_sum;
 
         //Correct barycentrics to fall within 0-1
         barycentric_x = barycentric_x * reciprocal_barycentric_sum;
@@ -527,13 +527,13 @@ inline fn drawSpanExperimental(
 
         //Compute (interpolate) z
         {
-            const a_z = @as(@Vector(warp_size, f32), @splat(triangle[0][2]));
-            const b_z = @as(@Vector(warp_size, f32), @splat(triangle[1][2]));
-            const c_z = @as(@Vector(warp_size, f32), @splat(triangle[2][2]));
+            const a_z = @as(WarpRegister(f32), @splat(triangle[0][2]));
+            const b_z = @as(WarpRegister(f32), @splat(triangle[1][2]));
+            const c_z = @as(WarpRegister(f32), @splat(triangle[2][2]));
 
-            point_z = @mulAdd(@Vector(warp_size, f32), a_z, barycentric_x, point_z);
-            point_z = @mulAdd(@Vector(warp_size, f32), b_z, barycentric_y, point_z);
-            point_z = @mulAdd(@Vector(warp_size, f32), c_z, barycentric_z, point_z);
+            point_z = @mulAdd(WarpRegister(f32), a_z, barycentric_x, point_z);
+            point_z = @mulAdd(WarpRegister(f32), b_z, barycentric_y, point_z);
+            point_z = @mulAdd(WarpRegister(f32), c_z, barycentric_z, point_z);
         }
 
         //Depth test
@@ -553,7 +553,7 @@ inline fn drawSpanExperimental(
             @truncate(@min(fragment_index + 7, raster_unit.render_pass.depth_buffer.len - 1)),
         };
 
-        const previous_z: @Vector(warp_size, f32) = .{
+        const previous_z: WarpRegister(f32) = .{
             raster_unit.render_pass.depth_buffer[fragment_index_vector[0]],
             raster_unit.render_pass.depth_buffer[fragment_index_vector[1]],
             raster_unit.render_pass.depth_buffer[fragment_index_vector[2]],
@@ -572,8 +572,8 @@ inline fn drawSpanExperimental(
         if (use_depth_testing) {
             const mask_int = @intFromBool(fragment_write_mask);
             const z_mask_int = @intFromBool(z_mask);
-            const depth_min: @Vector(warp_size, f32) = @splat(raster_unit.depth_min);
-            const depth_max: @Vector(warp_size, f32) = @splat(raster_unit.depth_max);
+            const depth_min: WarpRegister(f32) = @splat(raster_unit.depth_min);
+            const depth_max: WarpRegister(f32) = @splat(raster_unit.depth_max);
 
             const range_check_min = @intFromBool(point_z > depth_min);
             const range_check_max = @intFromBool(point_z < depth_max);
@@ -621,7 +621,7 @@ inline fn drawSpanExperimental(
                     pixel_out_start[0].a = 255;
 
                     if (fragment_index <= raster_unit.render_pass.depth_buffer.len) {
-                        const depth_out_buffer: *align(1) @Vector(warp_size, f32) = @ptrCast(&raster_unit.render_pass.depth_buffer[fragment_index]);
+                        const depth_out_buffer: *align(1) WarpRegister(f32) = @ptrCast(&raster_unit.render_pass.depth_buffer[fragment_index]);
                         depth_out_buffer[pixel_index] = depth_out[pixel_index];
                     }
                 }
@@ -629,66 +629,93 @@ inline fn drawSpanExperimental(
             continue;
         }
 
-        var r: @Vector(warp_size, f32) = @splat(0);
-        var g: @Vector(warp_size, f32) = @splat(0);
-        var b: @Vector(warp_size, f32) = @splat(0);
-        var a: @Vector(warp_size, f32) = @splat(0);
+        var r: WarpRegister(f32) = @splat(0);
+        var g: WarpRegister(f32) = @splat(0);
+        var b: WarpRegister(f32) = @splat(0);
+        var a: WarpRegister(f32) = @splat(0);
 
-        var u: @Vector(warp_size, f32) = @splat(0);
-        var v: @Vector(warp_size, f32) = @splat(0);
+        var u: WarpRegister(f32) = @splat(0);
+        var v: WarpRegister(f32) = @splat(0);
+
+        var normal: Vec3(f32) = Vec3(f32).init(.{ 0, 0, 0 });
+        var position_world_space: Vec3(f32) = Vec3(f32).init(.{ 0, 0, 0 });
 
         //interpolate attributes
         {
-            const ua = @as(@Vector(warp_size, f32), @splat(triangle_attributes[0].uv[0]));
-            const ub = @as(@Vector(warp_size, f32), @splat(triangle_attributes[1].uv[0]));
-            const uc = @as(@Vector(warp_size, f32), @splat(triangle_attributes[2].uv[0]));
+            const ua = @as(WarpRegister(f32), @splat(triangle_attributes[0].uv[0]));
+            const ub = @as(WarpRegister(f32), @splat(triangle_attributes[1].uv[0]));
+            const uc = @as(WarpRegister(f32), @splat(triangle_attributes[2].uv[0]));
 
-            const va = @as(@Vector(warp_size, f32), @splat(triangle_attributes[0].uv[1]));
-            const vb = @as(@Vector(warp_size, f32), @splat(triangle_attributes[1].uv[1]));
-            const vc = @as(@Vector(warp_size, f32), @splat(triangle_attributes[2].uv[1]));
+            const va = @as(WarpRegister(f32), @splat(triangle_attributes[0].uv[1]));
+            const vb = @as(WarpRegister(f32), @splat(triangle_attributes[1].uv[1]));
+            const vc = @as(WarpRegister(f32), @splat(triangle_attributes[2].uv[1]));
 
-            u = @mulAdd(@Vector(warp_size, f32), ua, barycentric_x, u);
-            u = @mulAdd(@Vector(warp_size, f32), ub, barycentric_y, u);
-            u = @mulAdd(@Vector(warp_size, f32), uc, barycentric_z, u);
+            u = @mulAdd(WarpRegister(f32), ua, barycentric_x, u);
+            u = @mulAdd(WarpRegister(f32), ub, barycentric_y, u);
+            u = @mulAdd(WarpRegister(f32), uc, barycentric_z, u);
 
-            v = @mulAdd(@Vector(warp_size, f32), va, barycentric_x, v);
-            v = @mulAdd(@Vector(warp_size, f32), vb, barycentric_y, v);
-            v = @mulAdd(@Vector(warp_size, f32), vc, barycentric_z, v);
+            v = @mulAdd(WarpRegister(f32), va, barycentric_x, v);
+            v = @mulAdd(WarpRegister(f32), vb, barycentric_y, v);
+            v = @mulAdd(WarpRegister(f32), vc, barycentric_z, v);
 
-            u = @min(@abs(u), @as(@Vector(warp_size, f32), @splat(1)));
-            v = @min(@abs(v), @as(@Vector(warp_size, f32), @splat(1)));
+            u = @min(@abs(u), @as(WarpRegister(f32), @splat(1)));
+            v = @min(@abs(v), @as(WarpRegister(f32), @splat(1)));
 
-            const ra = @as(@Vector(warp_size, f32), @splat(triangle_attributes[0].color[0]));
-            const rb = @as(@Vector(warp_size, f32), @splat(triangle_attributes[1].color[0]));
-            const rc = @as(@Vector(warp_size, f32), @splat(triangle_attributes[2].color[0]));
+            const ra = @as(WarpRegister(f32), @splat(triangle_attributes[0].color[0]));
+            const rb = @as(WarpRegister(f32), @splat(triangle_attributes[1].color[0]));
+            const rc = @as(WarpRegister(f32), @splat(triangle_attributes[2].color[0]));
 
-            const ga = @as(@Vector(warp_size, f32), @splat(triangle_attributes[0].color[1]));
-            const gb = @as(@Vector(warp_size, f32), @splat(triangle_attributes[1].color[1]));
-            const gc = @as(@Vector(warp_size, f32), @splat(triangle_attributes[2].color[1]));
+            const ga = @as(WarpRegister(f32), @splat(triangle_attributes[0].color[1]));
+            const gb = @as(WarpRegister(f32), @splat(triangle_attributes[1].color[1]));
+            const gc = @as(WarpRegister(f32), @splat(triangle_attributes[2].color[1]));
 
-            const ba = @as(@Vector(warp_size, f32), @splat(triangle_attributes[0].color[2]));
-            const bb = @as(@Vector(warp_size, f32), @splat(triangle_attributes[1].color[2]));
-            const bc = @as(@Vector(warp_size, f32), @splat(triangle_attributes[2].color[2]));
+            const ba = @as(WarpRegister(f32), @splat(triangle_attributes[0].color[2]));
+            const bb = @as(WarpRegister(f32), @splat(triangle_attributes[1].color[2]));
+            const bc = @as(WarpRegister(f32), @splat(triangle_attributes[2].color[2]));
 
-            const aa = @as(@Vector(warp_size, f32), @splat(triangle_attributes[0].color[3]));
-            const ab = @as(@Vector(warp_size, f32), @splat(triangle_attributes[1].color[3]));
-            const ac = @as(@Vector(warp_size, f32), @splat(triangle_attributes[2].color[3]));
+            const aa = @as(WarpRegister(f32), @splat(triangle_attributes[0].color[3]));
+            const ab = @as(WarpRegister(f32), @splat(triangle_attributes[1].color[3]));
+            const ac = @as(WarpRegister(f32), @splat(triangle_attributes[2].color[3]));
 
-            r = @mulAdd(@Vector(warp_size, f32), ra, barycentric_x, r);
-            r = @mulAdd(@Vector(warp_size, f32), rb, barycentric_y, r);
-            r = @mulAdd(@Vector(warp_size, f32), rc, barycentric_z, r);
+            r = @mulAdd(WarpRegister(f32), ra, barycentric_x, r);
+            r = @mulAdd(WarpRegister(f32), rb, barycentric_y, r);
+            r = @mulAdd(WarpRegister(f32), rc, barycentric_z, r);
 
-            g = @mulAdd(@Vector(warp_size, f32), ga, barycentric_x, g);
-            g = @mulAdd(@Vector(warp_size, f32), gb, barycentric_y, g);
-            g = @mulAdd(@Vector(warp_size, f32), gc, barycentric_z, g);
+            g = @mulAdd(WarpRegister(f32), ga, barycentric_x, g);
+            g = @mulAdd(WarpRegister(f32), gb, barycentric_y, g);
+            g = @mulAdd(WarpRegister(f32), gc, barycentric_z, g);
 
-            b = @mulAdd(@Vector(warp_size, f32), ba, barycentric_x, b);
-            b = @mulAdd(@Vector(warp_size, f32), bb, barycentric_y, b);
-            b = @mulAdd(@Vector(warp_size, f32), bc, barycentric_z, b);
+            b = @mulAdd(WarpRegister(f32), ba, barycentric_x, b);
+            b = @mulAdd(WarpRegister(f32), bb, barycentric_y, b);
+            b = @mulAdd(WarpRegister(f32), bc, barycentric_z, b);
 
-            a = @mulAdd(@Vector(warp_size, f32), aa, barycentric_x, a);
-            a = @mulAdd(@Vector(warp_size, f32), ab, barycentric_y, a);
-            a = @mulAdd(@Vector(warp_size, f32), ac, barycentric_z, a);
+            a = @mulAdd(WarpRegister(f32), aa, barycentric_x, a);
+            a = @mulAdd(WarpRegister(f32), ab, barycentric_y, a);
+            a = @mulAdd(WarpRegister(f32), ac, barycentric_z, a);
+
+            {
+                inline for (0..3) |comp_idx| {
+                    const value_a = @as(WarpRegister(f32), @splat(triangle_attributes[0].normal[comp_idx]));
+                    const value_b = @as(WarpRegister(f32), @splat(triangle_attributes[1].normal[comp_idx]));
+                    const value_c = @as(WarpRegister(f32), @splat(triangle_attributes[2].normal[comp_idx]));
+
+                    normal.set(comp_idx, @mulAdd(WarpRegister(f32), value_a, barycentric_x, normal.get(comp_idx)));
+                    normal.set(comp_idx, @mulAdd(WarpRegister(f32), value_b, barycentric_y, normal.get(comp_idx)));
+                    normal.set(comp_idx, @mulAdd(WarpRegister(f32), value_c, barycentric_z, normal.get(comp_idx)));
+                }
+            }
+
+            {
+                inline for (0..3) |comp_idx| {
+                    const value_a = @as(WarpRegister(f32), @splat(triangle_attributes[0].position_world_space[comp_idx]));
+                    const value_b = @as(WarpRegister(f32), @splat(triangle_attributes[1].position_world_space[comp_idx]));
+                    const value_c = @as(WarpRegister(f32), @splat(triangle_attributes[2].position_world_space[comp_idx]));
+
+                    position_world_space.set(comp_idx, @mulAdd(WarpRegister(f32), value_a, barycentric_x, position_world_space.get(comp_idx)));
+                    position_world_space.set(comp_idx, @mulAdd(WarpRegister(f32), value_b, barycentric_y, position_world_space.get(comp_idx)));
+                    position_world_space.set(comp_idx, @mulAdd(WarpRegister(f32), value_c, barycentric_z, position_world_space.get(comp_idx)));
+                }
+            }
         }
 
         const uniforms: *const @import("root").TestPipelineUniformInput = @ptrCast(@alignCast(raster_unit.uniform));
@@ -698,6 +725,8 @@ inline fn drawSpanExperimental(
             @ptrCast(uniforms.texture.?.texel_buffer.ptr),
             @intCast(uniforms.texture.?.width),
             @intCast(uniforms.texture.?.height),
+            normal,
+            position_world_space,
             u,
             v,
         ) else @splat(0);
@@ -711,29 +740,11 @@ inline fn drawSpanExperimental(
             a * fetched_pixels_unpacked.w,
         );
 
-        const depth_out_buffer: *align(1) @Vector(warp_size, f32) = @ptrCast(&raster_unit.render_pass.depth_buffer[fragment_index]);
+        const depth_out_buffer: *align(1) WarpRegister(f32) = @ptrCast(&raster_unit.render_pass.depth_buffer[fragment_index]);
         const fragment_out_buffer: *align(1) @Vector(warp_size, u32) = @ptrCast(&raster_unit.render_pass.color_image.texel_buffer.ptr[fragment_index]);
 
-        const shift_amnt: @Vector(warp_size, u32) = @splat(31);
-
-        maskedStore(f32, depth_out_buffer, point_z, @as(@Vector(warp_size, u32), @intFromBool(fragment_write_mask)) << shift_amnt);
-
-        const use_linear_tiling = true;
-
-        if (use_linear_tiling) {
-            maskedStore(u32, fragment_out_buffer, fragments, @as(@Vector(warp_size, u32), @intFromBool(fragment_write_mask)) << shift_amnt);
-        } else {
-            inline for (0..warp_size) |pixel_index| {
-                const pixel_out_start: [*]Image.Color = @ptrCast(raster_unit.render_pass.color_image.texelFetch(.{
-                    .x = @intCast(warp_scan_start + pixel_index),
-                    .y = @intCast(pixel_y),
-                }));
-
-                if (fragment_write_mask[pixel_index]) {
-                    pixel_out_start[0] = @bitCast(fragments[pixel_index]);
-                }
-            }
-        }
+        maskedStore(f32, depth_out_buffer, point_z, fragment_write_mask);
+        maskedStore(u32, fragment_out_buffer, fragments, fragment_write_mask);
     }
 }
 
@@ -778,14 +789,18 @@ fn vectorDotGeneric3D(comptime N: comptime_int, comptime T: type, a: @Vector(N, 
     return @reduce(.Add, a * b);
 }
 
-inline fn gather(base: [*]align(16) const u32, address: @Vector(8, u32)) @Vector(8, u32) {
-    var result: @Vector(8, u32) = undefined;
-
-    inline for (0..8) |i| {
-        result[i] = base[address[i]];
-    }
-
-    return result;
+inline fn gather(
+    base: [*]align(16) const u32,
+    address: @Vector(8, u32),
+) @Vector(8, u32) {
+    const mask: @Vector(8, u32) = @splat(std.math.maxInt(u32));
+    return asm (
+        \\vgatherdps %[mask], (%[base], %[address], 4), %[ret]
+        : [ret] "=v" (-> @Vector(8, u32)),
+        : [address] "{ymm15}" (address),
+          [base] "r" (base),
+          [mask] "{ymm14}" (mask),
+    );
 }
 
 inline fn scatter(base: [*]u32, address: @Vector(8, u32), values: @Vector(8, u32)) void {
@@ -794,15 +809,18 @@ inline fn scatter(base: [*]u32, address: @Vector(8, u32), values: @Vector(8, u32
     }
 }
 
-//Stores values into destination based on the value of the mask
+//Stores values into destination based on the value of the predicate
 inline fn maskedStore(
     comptime T: type,
     dest: *align(1) @Vector(8, T),
     values: @Vector(8, T),
-    mask: @Vector(8, u32),
+    predicate: @Vector(8, bool),
 ) void {
+    const shift_amnt: @Vector(8, u32) = @splat(31);
+    const mask: @Vector(8, u32) = @as(@Vector(8, u32), @intFromBool(predicate)) << shift_amnt;
+
     asm volatile (
-        \\vmaskmovps %[values],  %[mask], (%[dest])
+        \\vmaskmovps %[values], %[mask], (%[dest])
         :
         : [dest] "r" (dest),
           [values] "v" (values),
@@ -836,12 +854,7 @@ inline fn packUnorm4xf32(
     return result;
 }
 
-inline fn unpackUnorm4xf32(value: @Vector(8, u32)) struct {
-    x: @Vector(8, f32),
-    y: @Vector(8, f32),
-    z: @Vector(8, f32),
-    w: @Vector(8, f32),
-} {
+inline fn unpackUnorm4xf32(value: @Vector(8, u32)) Vec4(f32) {
     const w_int: @Vector(8, u32) = @intCast((value & @as(@Vector(8, u32), @splat(0xff000000))) >> @as(@Vector(8, u5), @splat(24)));
     const z_int: @Vector(8, u32) = @intCast((value & @as(@Vector(8, u32), @splat(0x00ff0000))) >> @as(@Vector(8, u5), @splat(16)));
     const y_int: @Vector(8, u32) = @intCast((value & @as(@Vector(8, u32), @splat(0x0000ff00))) >> @as(@Vector(8, u5), @splat(8)));
@@ -890,6 +903,90 @@ pub fn Vec3(comptime T: type) type {
         x: WarpRegister(T),
         y: WarpRegister(T),
         z: WarpRegister(T),
+
+        pub inline fn get(self: @This(), comptime index: u32) WarpRegister(f32) {
+            return switch (index) {
+                0 => self.x,
+                1 => self.y,
+                2 => self.z,
+                else => @compileError("Index out of bounds!"),
+            };
+        }
+
+        pub inline fn set(self: *@This(), comptime index: u32, value: WarpRegister(f32)) void {
+            return switch (index) {
+                0 => self.x = value,
+                1 => self.y = value,
+                2 => self.z = value,
+                else => @compileError("Index out of bounds!"),
+            };
+        }
+
+        pub inline fn init(
+            values: [3]f32,
+        ) @This() {
+            return .{
+                .x = @splat(values[0]),
+                .y = @splat(values[1]),
+                .z = @splat(values[2]),
+            };
+        }
+
+        pub inline fn neg(self: @This()) @This() {
+            return .{
+                .x = -self.x,
+                .y = -self.y,
+                .z = -self.z,
+            };
+        }
+
+        pub inline fn norm(self: @This()) @This() {
+            const one: WarpRegister(f32) = @splat(1);
+            const inverse_mag = one / self.mag();
+            return self.scale(inverse_mag);
+        }
+
+        pub inline fn mag(self: @This()) WarpRegister(f32) {
+            const squared = self.scalarProduct(self);
+
+            return @sqrt(squared);
+        }
+
+        pub inline fn distance(left: @This(), right: @This()) WarpRegister(f32) {
+            return mag(left.add(right.neg()));
+        }
+
+        pub inline fn add(left: @This(), right: @This()) @This() {
+            return .{
+                .x = left.x + right.x,
+                .y = left.y + right.y,
+                .z = left.z + right.z,
+            };
+        }
+
+        pub inline fn hadamardProduct(left: @This(), right: @This()) @This() {
+            return .{
+                .x = left.x * right.x,
+                .y = left.y * right.y,
+                .z = left.z * right.z,
+            };
+        }
+
+        pub inline fn scalarProduct(left: @This(), right: @This()) WarpRegister(T) {
+            const xx = left.x * right.x;
+            const yy = left.y * right.y;
+            const zz = left.z * right.z;
+
+            return xx + yy + zz;
+        }
+
+        pub inline fn scale(left: @This(), right: WarpRegister(T)) @This() {
+            return .{
+                .x = left.x * right,
+                .y = left.y * right,
+                .z = left.z * right,
+            };
+        }
     };
 }
 
@@ -963,7 +1060,6 @@ inline fn imageTexelFetch(
 
     //Could use a shift if image widths were restricted to be power of two size
     texel_address = y * @as(@Vector(8, u32), @splat(descriptor.width)) + x;
-    // texel_address = (texel_y << @as(@Vector(8, u32), @splat(img_width_po2))) + texel_x;
 
     const tile_width = 8;
     const tile_height = tile_width;
@@ -996,9 +1092,42 @@ inline fn imageTexelSampleNearest(
     u: WarpRegister(f32),
     v: WarpRegister(f32),
 ) WarpRegister(u32) {
-    _ = u; // autofix
-    _ = v; // autofix
-    _ = descriptor; // autofix
+    const width_float: @Vector(8, f32) = @splat(@floatFromInt(descriptor.width));
+    const height_float: @Vector(8, f32) = @splat(@floatFromInt(descriptor.height));
+
+    var texel_x: @Vector(8, u32) = undefined;
+    var texel_y: @Vector(8, u32) = undefined;
+
+    texel_x = @intFromFloat(u * width_float);
+    texel_y = @intFromFloat(v * height_float);
+
+    const texel = imageTexelFetch(
+        descriptor,
+        texel_x,
+        texel_y,
+    );
+
+    return texel;
+}
+
+///Bilinear texture sampling. Does not handle wrapping
+inline fn imageTexelSampleLinear4x(
+    descriptor: ImageDescriptor,
+    u: WarpRegister(f32),
+    v: WarpRegister(f32),
+) Vec4(f32) {
+    const scaled_u = u * @as(WarpRegister(f32), @splat(@floatFromInt(descriptor.width)));
+    const scaled_v = v * @as(WarpRegister(f32), @splat(@floatFromInt(descriptor.height)));
+
+    const texel_point_x = @floor(scaled_u);
+    const texel_point_y = @floor(scaled_v);
+    const texel_point_offset_x = scaled_u - texel_point_x;
+    const texel_point_offset_y = scaled_v - texel_point_y;
+    _ = texel_point_offset_y; // autofix
+    _ = texel_point_offset_x; // autofix
+
+    const texel_0 = imageTexelFetch(descriptor, u, v);
+    _ = texel_0; // autofix
 }
 
 ///Execute 8 fragment shaders at a time
@@ -1010,32 +1139,56 @@ fn shader8xTest(
     img_width_po2: u32,
     ///Power of two image height
     img_height_po2: u32,
-    u: @Vector(8, f32),
-    v: @Vector(8, f32),
-) @Vector(8, u32) {
-    _ = uniforms; // autofix
-    const tile_width = Image.tile_width;
-    _ = tile_width; // autofix
-    const tile_height = Image.tile_height;
-    _ = tile_height; // autofix
-
-    const width_float: @Vector(8, f32) = @splat(@floatFromInt(img_width_po2));
-    const height_float: @Vector(8, f32) = @splat(@floatFromInt(img_height_po2));
-
-    var texel_x: @Vector(8, u32) = undefined;
-    var texel_y: @Vector(8, u32) = undefined;
-
-    texel_x = @intFromFloat(u * width_float);
-    texel_y = @intFromFloat(v * height_float);
-
-    //idx = y * width + x = fma(y, width, x); (linear mo
-    const texel = imageTexelFetch(
+    normal: Vec3(f32),
+    position_world_space: Vec3(f32),
+    u: WarpRegister(f32),
+    v: WarpRegister(f32),
+) WarpRegister(u32) {
+    const texel = imageTexelSampleNearest(
         .{ .base = img, .width = img_width_po2, .height = img_height_po2 },
-        texel_x,
-        texel_y,
+        u,
+        v,
     );
 
-    return texel;
+    var color: Vec4(f32) = unpackUnorm4xf32(texel);
+
+    const enable_lighting = true;
+
+    if (enable_lighting) {
+        var light_contribution = Vec3(f32).init(.{ 0.1, 0.1, 0.1 });
+
+        for (uniforms.lights) |light| {
+            const light_pos: Vec3(f32) = .{
+                .x = @splat(light.position[0]),
+                .y = @splat(light.position[1]),
+                .z = @splat(light.position[2]),
+            };
+            const light_color = Vec3(f32).init(light.color);
+            const light_dir = Vec3(f32).norm(light_pos.add(position_world_space.neg()));
+            const light_radius: WarpRegister(f32) = @splat(0.01);
+
+            const distance_to_light = Vec3(f32).distance(light_pos, position_world_space);
+
+            const attentuation = @as(WarpRegister(f32), @splat(1)) / @max(distance_to_light * distance_to_light, light_radius * light_radius);
+
+            const light_intensity = @max(Vec3(f32).scalarProduct(normal, light_dir) * @as(WarpRegister(f32), @splat(light.intensity)), @as(WarpRegister(f32), @splat(0)));
+            const attenuated_light_intensity = light_intensity * attentuation;
+
+            const local_contribution = light_color.hadamardProduct(Vec3(f32){ .x = attenuated_light_intensity, .y = attenuated_light_intensity, .z = attenuated_light_intensity });
+
+            light_contribution = light_contribution.add(local_contribution);
+        }
+
+        color.x *= light_contribution.x;
+        color.y *= light_contribution.y;
+        color.z *= light_contribution.z;
+    }
+
+    color.x = std.math.clamp(color.x, @as(WarpRegister(f32), @splat(0)), @as(WarpRegister(f32), @splat(1)));
+    color.y = std.math.clamp(color.y, @as(WarpRegister(f32), @splat(0)), @as(WarpRegister(f32), @splat(1)));
+    color.z = std.math.clamp(color.z, @as(WarpRegister(f32), @splat(0)), @as(WarpRegister(f32), @splat(1)));
+
+    return packUnorm4xf32(color.x, color.y, color.z, color.w);
 }
 
 const RasterUnit = @import("RasterUnit.zig");

@@ -1,0 +1,36 @@
+{
+    "lldb.displayFormat": "auto",
+    "lldb.dereferencePointers": true,
+    "lldb.consoleMode": "commands",
+    "lldb.showDisassembly": "auto",
+    "disasexpl.useBinaryParsing": true,
+    "disasexpl.associations": {
+        "**/*.zig": "${workspaceFolder}/zig-out/output.s",
+    },
+    "compiler-explorer.default.options": {
+        "type": "object",
+        "description": "The default compiler configuration",
+        "default": {
+                "compiler": "x86-64 zig trunk",
+                "language": "zig",
+                "options": "-std=c++17",
+                "exec": "",
+                "stdin": "",
+                "cmakeArgs": "",
+                "src": "workspace",
+                "filters": {
+                "binaryObject": false,
+                "binary": false,
+                "execute": false,
+                "intel": true,
+                "demangle": true,
+                "labels": true,
+                "libraryCode": true,
+                "directives": true,
+                "commentOnly": true,
+                "trim": false,
+                "debugCalls": false
+            }
+        }
+    }
+}
